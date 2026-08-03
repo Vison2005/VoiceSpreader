@@ -8,11 +8,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 class OutputWorker;
+class RemoteMicrophoneBuffer;
 
 struct AcousticTrackedOutput
 {
@@ -35,7 +37,8 @@ public:
                          std::vector<AcousticTrackedOutput> outputs,
                          ProgramLevelCallback programLevelCallback,
                          StatusCallback statusCallback,
-                         CorrectionCallback correctionCallback);
+                         CorrectionCallback correctionCallback,
+                         std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone = nullptr);
     ~AcousticDriftTracker();
 
     AcousticDriftTracker(const AcousticDriftTracker&) = delete;
@@ -53,6 +56,7 @@ private:
     ProgramLevelCallback programLevelCallback_;
     StatusCallback statusCallback_;
     CorrectionCallback correctionCallback_;
+    std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone_;
     std::atomic_bool stopRequested_{false};
     std::thread thread_;
     std::mutex waitMutex_;

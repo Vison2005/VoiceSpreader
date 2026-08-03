@@ -2,6 +2,7 @@
 
 #include "acoustic_drift_tracker.h"
 #include "output_worker.h"
+#include "remote_microphone_buffer.h"
 #include "wasapi_helpers.h"
 
 #include <audioclient.h>
@@ -113,7 +114,8 @@ bool AudioEngine::start(const AudioDevice& captureSource,
                         bool preferExclusiveOutputs,
                         bool automaticLatencyCompensation,
                         const AudioDevice& acousticMicrophone,
-                        bool continuousAcousticTracking)
+                        bool continuousAcousticTracking,
+                        std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone)
 {
     if (active_.exchange(true)) {
         return false;
@@ -149,7 +151,8 @@ bool AudioEngine::start(const AudioDevice& captureSource,
                           preferExclusiveOutputs,
                           automaticLatencyCompensation,
                           acousticMicrophone,
-                          continuousAcousticTracking);
+                          continuousAcousticTracking,
+                          std::move(remoteMicrophone));
     return true;
 }
 
@@ -204,7 +207,8 @@ void AudioEngine::run(AudioDevice captureSource,
                       bool preferExclusiveOutputs,
                       bool automaticLatencyCompensation,
                       AudioDevice acousticMicrophone,
-                      bool continuousAcousticTracking)
+                      bool continuousAcousticTracking,
+                      std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone)
 {
     std::vector<std::unique_ptr<OutputWorker>> outputWorkers;
     std::unique_ptr<AcousticDriftTracker> acousticTracker;
@@ -332,7 +336,10 @@ void AudioEngine::run(AudioDevice captureSource,
 
         checkHresult(captureAudioClient->Start(), "启动 WASAPI Loopback");
 
-        if (continuousAcousticTracking && !acousticMicrophone.id.isEmpty()
+        const bool remoteMicrophoneReady = remoteMicrophone != nullptr
+                                           && remoteMicrophone->isConnected();
+        if (continuousAcousticTracking
+            && (remoteMicrophoneReady || !acousticMicrophone.id.isEmpty())
             && activeOutputCount >= 2) {
             std::vector<AcousticTrackedOutput> trackedOutputs;
             for (int index = 0; index < static_cast<int>(outputWorkers.size()); ++index) {
@@ -365,7 +372,8 @@ void AudioEngine::run(AudioDevice captureSource,
                                                    driftPpm,
                                                    probeMode,
                                                    confidence);
-                });
+                },
+                remoteMicrophoneReady ? remoteMicrophone : nullptr);
             acousticTracker->start();
         } else if (continuousAcousticTracking) {
             emit statusChanged(QStringLiteral("连续声学跟踪未启动：需要麦克风和至少两个可用输出"));

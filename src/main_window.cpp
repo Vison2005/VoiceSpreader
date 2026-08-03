@@ -1,16 +1,19 @@
 #include "main_window.h"
 
+#include "pairing_qr_code.h"
 #include "wasapi_device_manager.h"
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
 #include <QFontDatabase>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QPixmap>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -45,6 +48,7 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , engine_(this)
     , calibrator_(this)
+    , phonePairingServer_(this)
 {
     setWindowTitle(QStringLiteral("VoiceSpreader - 多设备音频同步"));
     setMinimumSize(980, 680);
@@ -149,6 +153,35 @@ MainWindow::MainWindow(QWidget* parent)
     calibrationHintLabel_->setObjectName(QStringLiteral("MutedText"));
     calibrationHintLabel_->setWordWrap(true);
     sourceLayout->addWidget(calibrationHintLabel_);
+
+    auto* phoneHeader = new QHBoxLayout();
+    auto* phoneTitle = new QLabel(QStringLiteral("手机麦克风"), sourceCard);
+    phoneTitle->setObjectName(QStringLiteral("ControlLabel"));
+    phoneHeader->addWidget(phoneTitle);
+    phoneHeader->addStretch();
+    auto* phoneTag = new QLabel(QStringLiteral("ANDROID · LAN"), sourceCard);
+    phoneTag->setObjectName(QStringLiteral("Tag"));
+    phoneHeader->addWidget(phoneTag);
+    sourceLayout->addLayout(phoneHeader);
+
+    auto* phoneControls = new QHBoxLayout();
+    phoneStatusLabel_ = new QLabel(QStringLiteral("配对服务正在初始化"), sourceCard);
+    phoneStatusLabel_->setObjectName(QStringLiteral("PhoneStatus"));
+    phoneStatusLabel_->setWordWrap(true);
+    phonePairButton_ = new QPushButton(QStringLiteral("配对手机"), sourceCard);
+    phonePairButton_->setObjectName(QStringLiteral("SecondaryButton"));
+    phonePairButton_->setMinimumHeight(36);
+    phoneControls->addWidget(phoneStatusLabel_, 1);
+    phoneControls->addWidget(phonePairButton_);
+    sourceLayout->addLayout(phoneControls);
+
+    usePhoneMicrophoneCheck_ = new QCheckBox(
+        QStringLiteral("连续声学跟踪使用手机麦克风"), sourceCard);
+    usePhoneMicrophoneCheck_->setEnabled(false);
+    sourceLayout->addWidget(usePhoneMicrophoneCheck_);
+    phoneLevelLabel_ = new QLabel(QStringLiteral("手机麦克风电平：未连接"), sourceCard);
+    phoneLevelLabel_->setObjectName(QStringLiteral("MutedText"));
+    sourceLayout->addWidget(phoneLevelLabel_);
     leftLayout->addWidget(sourceCard);
 
     auto* outputCard = new QFrame(leftColumn);
@@ -334,6 +367,14 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::updateAcousticCorrection);
     connect(&engine_, &AudioEngine::programLevelChanged,
             this, &MainWindow::updateProgramLevel);
+    connect(phonePairButton_, &QPushButton::clicked,
+            this, &MainWindow::showPhonePairing);
+    connect(&phonePairingServer_, &PhonePairingServer::statusChanged,
+            this, &MainWindow::appendStatus);
+    connect(&phonePairingServer_, &PhonePairingServer::connectionChanged,
+            this, &MainWindow::updatePhoneConnection);
+    connect(&phonePairingServer_, &PhonePairingServer::microphoneLevelChanged,
+            this, &MainWindow::updatePhoneMicrophoneLevel);
     connect(&calibrator_, &LatencyCalibrator::statusChanged,
             this, &MainWindow::appendStatus);
     connect(&calibrator_, &LatencyCalibrator::errorOccurred,
@@ -345,12 +386,21 @@ MainWindow::MainWindow(QWidget* parent)
 
     applyTheme();
     refreshDevices();
+    QString pairingError;
+    if (phonePairingServer_.start(&pairingError)) {
+        phoneStatusLabel_->setText(
+            QStringLiteral("未连接 · 配对码 %1").arg(phonePairingServer_.pairingCode()));
+    } else {
+        phoneStatusLabel_->setText(QStringLiteral("配对服务启动失败"));
+        appendStatus(QStringLiteral("手机配对服务启动失败：%1").arg(pairingError));
+    }
 }
 
 MainWindow::~MainWindow()
 {
     calibrator_.stop();
     engine_.stop();
+    phonePairingServer_.stop();
 }
 
 void MainWindow::refreshDevices()
@@ -553,7 +603,10 @@ void MainWindow::startAudio()
     }
     const bool continuousTracking = continuousAcousticCheck_->isChecked()
                                     && outputs.size() >= 2;
-    if (continuousTracking && microphone.id.isEmpty()) {
+    const bool usePhoneMicrophone = continuousTracking
+                                    && usePhoneMicrophoneCheck_->isChecked()
+                                    && phonePairingServer_.phoneConnected();
+    if (continuousTracking && !usePhoneMicrophone && microphone.id.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("无法启动声学跟踪"),
                              QStringLiteral("请选择用于连续测量的麦克风。"));
         return;
@@ -565,7 +618,10 @@ void MainWindow::startAudio()
                        exclusiveModeCheck_->isChecked(),
                        automaticLatencyCheck_->isChecked(),
                        microphone,
-                       continuousTracking)) {
+                       continuousTracking,
+                       usePhoneMicrophone
+                           ? phonePairingServer_.remoteBuffer()
+                           : nullptr)) {
         QMessageBox::information(this, QStringLiteral("提示"),
                                  QStringLiteral("音频引擎已经在启动或运行。"));
         return;
@@ -740,6 +796,101 @@ void MainWindow::updateProgramLevel(double levelDbfs, bool probeAllowed)
     refreshDynamicStyle(programLevelLabel_);
 }
 
+void MainWindow::showPhonePairing()
+{
+    if (phonePairingServer_.serverPort() == 0) {
+        QString error;
+        if (!phonePairingServer_.start(&error)) {
+            QMessageBox::critical(this,
+                                  QStringLiteral("手机配对失败"),
+                                  QStringLiteral("无法启动配对服务：%1").arg(error));
+            return;
+        }
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("配对 Android 手机"));
+    dialog.setMinimumWidth(430);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* title = new QLabel(QStringLiteral("用 VoiceSpreader Android 扫描二维码"), &dialog);
+    title->setObjectName(QStringLiteral("SectionTitle"));
+    layout->addWidget(title, 0, Qt::AlignHCenter);
+
+    auto* qrLabel = new QLabel(&dialog);
+    qrLabel->setAlignment(Qt::AlignCenter);
+    auto refreshQr = [&] {
+        const QImage qr = createPairingQrCode(phonePairingServer_.pairingPayload(), 7);
+        qrLabel->setPixmap(QPixmap::fromImage(qr));
+    };
+    refreshQr();
+    layout->addWidget(qrLabel, 0, Qt::AlignHCenter);
+
+    auto* codeLabel = new QLabel(
+        QStringLiteral("或在手机输入配对码：<b style='font-size:24px'>%1</b>")
+            .arg(phonePairingServer_.pairingCode()),
+        &dialog);
+    codeLabel->setAlignment(Qt::AlignCenter);
+    layout->addWidget(codeLabel);
+    auto* addressLabel = new QLabel(
+        QStringLiteral("电脑地址 %1:%2 · 手机和电脑必须连接同一局域网")
+            .arg(phonePairingServer_.localAddress())
+            .arg(phonePairingServer_.serverPort()),
+        &dialog);
+    addressLabel->setObjectName(QStringLiteral("MutedText"));
+    addressLabel->setAlignment(Qt::AlignCenter);
+    addressLabel->setWordWrap(true);
+    layout->addWidget(addressLabel);
+
+    auto* actions = new QHBoxLayout();
+    auto* regenerateButton = new QPushButton(QStringLiteral("生成新配对码"), &dialog);
+    regenerateButton->setObjectName(QStringLiteral("SecondaryButton"));
+    auto* closeButton = new QPushButton(QStringLiteral("关闭"), &dialog);
+    closeButton->setObjectName(QStringLiteral("PrimaryButton"));
+    actions->addWidget(regenerateButton);
+    actions->addStretch();
+    actions->addWidget(closeButton);
+    layout->addLayout(actions);
+    connect(regenerateButton, &QPushButton::clicked, &dialog, [&] {
+        phonePairingServer_.resetPairing();
+        refreshQr();
+        codeLabel->setText(
+            QStringLiteral("或在手机输入配对码：<b style='font-size:24px'>%1</b>")
+                .arg(phonePairingServer_.pairingCode()));
+        phoneStatusLabel_->setText(
+            QStringLiteral("未连接 · 配对码 %1").arg(phonePairingServer_.pairingCode()));
+    });
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(&phonePairingServer_, &PhonePairingServer::connectionChanged,
+            &dialog, [&dialog](bool connected, const QString&) {
+                if (connected) {
+                    dialog.accept();
+                }
+            });
+    dialog.exec();
+}
+
+void MainWindow::updatePhoneConnection(bool connected, const QString& phoneName)
+{
+    if (connected) {
+        phoneStatusLabel_->setText(QStringLiteral("已连接：%1").arg(phoneName));
+        usePhoneMicrophoneCheck_->setEnabled(!engine_.isActive());
+        usePhoneMicrophoneCheck_->setChecked(true);
+        phoneLevelLabel_->setText(QStringLiteral("手机麦克风电平：等待采样"));
+    } else {
+        phoneStatusLabel_->setText(
+            QStringLiteral("未连接 · 配对码 %1").arg(phonePairingServer_.pairingCode()));
+        usePhoneMicrophoneCheck_->setChecked(false);
+        usePhoneMicrophoneCheck_->setEnabled(false);
+        phoneLevelLabel_->setText(QStringLiteral("手机麦克风电平：未连接"));
+    }
+}
+
+void MainWindow::updatePhoneMicrophoneLevel(double levelDbfs)
+{
+    phoneLevelLabel_->setText(
+        QStringLiteral("手机麦克风电平：%1 dBFS").arg(levelDbfs, 0, 'f', 1));
+}
+
 void MainWindow::appendStatus(const QString& message)
 {
     const QString timestamp = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"));
@@ -855,6 +1006,9 @@ void MainWindow::setControlsEnabled(bool enabled)
     bufferSpin_->setEnabled(enabled || engine_.isActive());
     automaticLatencyCheck_->setEnabled(enabled);
     continuousAcousticCheck_->setEnabled(enabled);
+    usePhoneMicrophoneCheck_->setEnabled(enabled
+                                         && phonePairingServer_.phoneConnected());
+    phonePairButton_->setEnabled(enabled);
     exclusiveModeCheck_->setEnabled(enabled);
     refreshButton_->setEnabled(enabled);
     startButton_->setEnabled(enabled);
@@ -888,6 +1042,7 @@ QLabel#ValueLabel { color: #4c5870; font-weight: 600; }
 QLabel#AcousticState { color: #557061; background: #edf8f3; border-radius: 6px; padding: 4px 7px; font-size: 11px; }
 QLabel#ProgramLevel { color: #8a5b27; background: #fff6e8; border-radius: 7px; padding: 5px 8px; font-size: 11px; }
 QLabel#ProgramLevel[active="true"] { color: #17765b; background: #eaf9f3; }
+QLabel#PhoneStatus { color: #496174; background: #edf4f8; border-radius: 7px; padding: 6px 8px; }
 QLabel#Tag, QLabel#CountBadge { color: #6570dc; background: #eef0ff; border: 1px solid #dfe2ff; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 650; }
 QLabel#AccentBadge { color: #4e5bd7; background: #eef0ff; border-radius: 10px; padding: 5px 10px; font-weight: 600; }
 QLabel#SourceHint { color: #9a5b16; background: #fff7e8; border: 1px solid #f7dfb5; border-radius: 8px; padding: 8px 10px; }
@@ -931,6 +1086,7 @@ QLabel#ValueLabel { color: #aeb7c8; font-weight: 600; }
 QLabel#AcousticState { color: #83c9ae; background: #1a2c29; border-radius: 6px; padding: 4px 7px; font-size: 11px; }
 QLabel#ProgramLevel { color: #d0a36b; background: #2c2419; border-radius: 7px; padding: 5px 8px; font-size: 11px; }
 QLabel#ProgramLevel[active="true"] { color: #75d8b7; background: #172a27; }
+QLabel#PhoneStatus { color: #9cc5d8; background: #182831; border-radius: 7px; padding: 6px 8px; }
 QLabel#Tag, QLabel#CountBadge { color: #aeb3ff; background: #272d4e; border: 1px solid #343b64; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 650; }
 QLabel#AccentBadge { color: #b7bbff; background: #272d4e; border-radius: 10px; padding: 5px 10px; font-weight: 600; }
 QLabel#SourceHint { color: #e4b26a; background: #2c2419; border: 1px solid #493921; border-radius: 8px; padding: 8px 10px; }

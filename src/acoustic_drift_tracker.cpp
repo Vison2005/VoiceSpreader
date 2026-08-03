@@ -2,6 +2,7 @@
 
 #include "calibration_signal.h"
 #include "output_worker.h"
+#include "remote_microphone_buffer.h"
 #include "wasapi_helpers.h"
 
 #include <Windows.h>
@@ -163,12 +164,14 @@ AcousticDriftTracker::AcousticDriftTracker(
     std::vector<AcousticTrackedOutput> outputs,
     ProgramLevelCallback programLevelCallback,
     StatusCallback statusCallback,
-    CorrectionCallback correctionCallback)
+    CorrectionCallback correctionCallback,
+    std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone)
     : microphone_(std::move(microphone))
     , outputs_(std::move(outputs))
     , programLevelCallback_(std::move(programLevelCallback))
     , statusCallback_(std::move(statusCallback))
     , correctionCallback_(std::move(correctionCallback))
+    , remoteMicrophone_(std::move(remoteMicrophone))
 {
 }
 
@@ -208,42 +211,62 @@ void AcousticDriftTracker::run()
         ComInitializer com(COINIT_MULTITHREADED);
         MmcssRegistration mmcss;
 
-        ComPtr<IMMDeviceEnumerator> enumerator;
-        checkHresult(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                      IID_PPV_ARGS(&enumerator)),
-                     "创建连续声学校准设备枚举器");
-        ComPtr<IMMDevice> endpoint;
-        const std::wstring microphoneId = toWideString(microphone_.id);
-        checkHresult(enumerator->GetDevice(microphoneId.c_str(), &endpoint),
-                     "打开连续声学校准麦克风");
-        checkHresult(endpoint->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                        reinterpret_cast<void**>(audioClient.GetAddressOf())),
-                     "激活连续声学校准麦克风");
-
-        WAVEFORMATEX* rawFormat = nullptr;
-        checkHresult(audioClient->GetMixFormat(&rawFormat), "获取连续声学校准麦克风格式");
-        std::unique_ptr<WAVEFORMATEX, CoTaskMemWaveFormatDeleter> captureWaveFormat(rawFormat);
-        const CaptureFormat captureFormat = inspectCaptureFormat(captureWaveFormat.get());
-        checkHresult(audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                             AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                                                 | AUDCLNT_STREAMFLAGS_NOPERSIST,
-                                             0,
-                                             0,
-                                             captureWaveFormat.get(),
-                                             nullptr),
-                     "初始化连续声学校准麦克风");
-
-        UniqueHandle captureEvent(CreateEventW(nullptr, FALSE, FALSE, nullptr));
-        if (!captureEvent) {
-            checkHresult(HRESULT_FROM_WIN32(GetLastError()), "创建连续声学捕获事件");
-        }
-        checkHresult(audioClient->SetEventHandle(captureEvent.get()),
-                     "设置连续声学捕获事件");
         ComPtr<IAudioCaptureClient> captureClient;
-        checkHresult(audioClient->GetService(IID_PPV_ARGS(&captureClient)),
-                     "获取连续声学捕获客户端");
-        checkHresult(audioClient->Start(), "启动连续声学麦克风");
-        captureStarted = true;
+        UniqueHandle captureEvent;
+        CaptureFormat captureFormat;
+        const bool useRemoteMicrophone = remoteMicrophone_ != nullptr
+                                         && remoteMicrophone_->isConnected();
+        if (useRemoteMicrophone) {
+            captureFormat.sampleRate = remoteMicrophone_->sampleRate();
+            captureFormat.channels = 1;
+            captureFormat.bitsPerSample = 32;
+            captureFormat.bytesPerFrame = sizeof(float);
+            captureFormat.floatingPoint = true;
+            if (captureFormat.sampleRate == 0) {
+                throw std::runtime_error("手机麦克风尚未开始发送音频");
+            }
+        } else {
+            ComPtr<IMMDeviceEnumerator> enumerator;
+            checkHresult(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                          IID_PPV_ARGS(&enumerator)),
+                         "创建连续声学校准设备枚举器");
+            ComPtr<IMMDevice> endpoint;
+            const std::wstring microphoneId = toWideString(microphone_.id);
+            checkHresult(enumerator->GetDevice(microphoneId.c_str(), &endpoint),
+                         "打开连续声学校准麦克风");
+            checkHresult(endpoint->Activate(
+                             __uuidof(IAudioClient),
+                             CLSCTX_ALL,
+                             nullptr,
+                             reinterpret_cast<void**>(audioClient.GetAddressOf())),
+                         "激活连续声学校准麦克风");
+
+            WAVEFORMATEX* rawFormat = nullptr;
+            checkHresult(audioClient->GetMixFormat(&rawFormat),
+                         "获取连续声学校准麦克风格式");
+            std::unique_ptr<WAVEFORMATEX, CoTaskMemWaveFormatDeleter> captureWaveFormat(
+                rawFormat);
+            captureFormat = inspectCaptureFormat(captureWaveFormat.get());
+            checkHresult(audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+                                                     | AUDCLNT_STREAMFLAGS_NOPERSIST,
+                                                 0,
+                                                 0,
+                                                 captureWaveFormat.get(),
+                                                 nullptr),
+                         "初始化连续声学校准麦克风");
+
+            captureEvent = UniqueHandle(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+            if (!captureEvent) {
+                checkHresult(HRESULT_FROM_WIN32(GetLastError()), "创建连续声学捕获事件");
+            }
+            checkHresult(audioClient->SetEventHandle(captureEvent.get()),
+                         "设置连续声学捕获事件");
+            checkHresult(audioClient->GetService(IID_PPV_ARGS(&captureClient)),
+                         "获取连续声学捕获客户端");
+            checkHresult(audioClient->Start(), "启动连续声学麦克风");
+            captureStarted = true;
+        }
 
         std::vector<TrackerState> states;
         states.reserve(outputs_.size());
@@ -259,11 +282,16 @@ void AcousticDriftTracker::run()
         }
 
         if (statusCallback_) {
-            statusCallback_(QStringLiteral("自适应声学跟踪已启动：优先超声，自检失败后自动切换低电平扩频"));
+            statusCallback_(useRemoteMicrophone
+                                ? QStringLiteral("自适应声学跟踪已使用手机麦克风：网络延迟通过手机采样序号抵消")
+                                : QStringLiteral("自适应声学跟踪已启动：优先超声，自检失败后自动切换低电平扩频"));
         }
 
         auto drainCapture = [&](std::vector<float>* recording,
                                 std::uint64_t* firstQpc) {
+            if (useRemoteMicrophone) {
+                return;
+            }
             UINT32 packetFrames = 0;
             checkHresult(captureClient->GetNextPacketSize(&packetFrames),
                          "读取连续声学麦克风包大小");
@@ -345,8 +373,14 @@ void AcousticDriftTracker::run()
                                                               0.0006F,
                                                               0.0030F));
 
-            // 丢弃旧麦克风包，使第一包时间戳紧邻本次探针。
-            drainCapture(nullptr, nullptr);
+            const std::uint64_t remoteCaptureStart = useRemoteMicrophone
+                                                         ? remoteMicrophone_
+                                                               ->latestFrameIndex()
+                                                         : 0;
+            // 本机麦克风先丢弃旧包；手机流保留绝对采样序号，无需依赖网络到达时刻。
+            if (!useRemoteMicrophone) {
+                drainCapture(nullptr, nullptr);
+            }
             const std::uint64_t generation = state.output.worker->scheduleAcousticProbe(
                 outputProbe,
                 amplitude);
@@ -368,6 +402,59 @@ void AcousticDriftTracker::run()
                     + 0.55,
                 0.75,
                 2.8);
+            if (useRemoteMicrophone) {
+                const std::uint64_t frameAtProbeStart = remoteMicrophone_
+                                                            ->latestFrameIndex();
+                const std::uint64_t requiredFrame = frameAtProbeStart
+                                                    + static_cast<std::uint64_t>(
+                                                        std::ceil(captureSeconds
+                                                                  * captureFormat.sampleRate));
+                if (!remoteMicrophone_->waitUntilFrame(
+                        requiredFrame,
+                        std::chrono::milliseconds(
+                            static_cast<int>(captureSeconds * 1000.0) + 2500),
+                        &stopRequested_)) {
+                    return result;
+                }
+                const RemoteAudioSnapshot snapshot = remoteMicrophone_->snapshotFrom(
+                    remoteCaptureStart);
+                if (snapshot.samples.empty() || snapshot.sampleRate == 0) {
+                    return result;
+                }
+                const double availableSeconds = static_cast<double>(snapshot.samples.size())
+                                                / snapshot.sampleRate;
+                const ProbeDetection detection = detectKnownProbe(
+                    snapshot.samples,
+                    snapshot.sampleRate,
+                    referenceProbe,
+                    0.0,
+                    0.0,
+                    availableSeconds,
+                    0.035,
+                    mode == ProbeMode::ultrasonic
+                        ? std::max(18000.0,
+                                   std::min(19800.0,
+                                            snapshot.sampleRate * 0.5 - 2300.0))
+                        : std::min(15800.0, snapshot.sampleRate * 0.34) - 2300.0,
+                    mode == ProbeMode::ultrasonic
+                        ? std::min(22500.0, snapshot.sampleRate * 0.5 - 100.0)
+                        : std::min(15800.0, snapshot.sampleRate * 0.34) + 2300.0);
+                if (!detection.detected) {
+                    result.confidence = detection.confidence;
+                    return result;
+                }
+                const double arrivalFrame = snapshot.firstFrameIndex
+                                            + detection.arrivalSeconds
+                                                  * snapshot.sampleRate;
+                result.detected = true;
+                // 两个独立时钟的原点是公共常数；设备间作差后它会消失。
+                result.latencyMilliseconds = arrivalFrame * 1000.0
+                                                 / snapshot.sampleRate
+                                             - probeStartQpc / 10000.0;
+                result.confidence = detection.confidence;
+                return result;
+            }
+
             std::vector<float> recording;
             recording.reserve(static_cast<std::size_t>(captureSeconds
                                                         * captureFormat.sampleRate));
@@ -581,8 +668,10 @@ void AcousticDriftTracker::run()
             }
         }
 
-        audioClient->Stop();
-        captureStarted = false;
+        if (captureStarted && audioClient != nullptr) {
+            audioClient->Stop();
+            captureStarted = false;
+        }
     } catch (const std::exception& exception) {
         if (captureStarted && audioClient != nullptr) {
             audioClient->Stop();

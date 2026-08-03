@@ -3,6 +3,7 @@
 #include "audio_device.h"
 #include "audio_engine.h"
 #include "latency_calibrator.h"
+#include "phone_pairing_server.h"
 
 #include <QHash>
 #include <QMainWindow>
@@ -48,6 +49,9 @@ private slots:
                                   const QString& probeMode,
                                   double confidence);
     void updateProgramLevel(double levelDbfs, bool probeAllowed);
+    void showPhonePairing();
+    void updatePhoneConnection(bool connected, const QString& phoneName);
+    void updatePhoneMicrophoneLevel(double levelDbfs);
 
 private:
     AudioDevice currentCaptureDevice() const;
@@ -58,6 +62,7 @@ private:
 
     AudioEngine engine_;
     LatencyCalibrator calibrator_;
+    PhonePairingServer phonePairingServer_;
     QVector<AudioDevice> devices_;
     QVector<AudioDevice> microphoneDevices_;
 
@@ -80,6 +85,10 @@ private:
     QTextEdit* logView_ = nullptr;
     QLabel* calibrationHintLabel_ = nullptr;
     QLabel* programLevelLabel_ = nullptr;
+    QLabel* phoneStatusLabel_ = nullptr;
+    QLabel* phoneLevelLabel_ = nullptr;
+    QPushButton* phonePairButton_ = nullptr;
+    QCheckBox* usePhoneMicrophoneCheck_ = nullptr;
 
     QHash<QString, QCheckBox*> outputChecks_;
     QHash<QString, QSlider*> volumeSliders_;

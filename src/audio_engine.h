@@ -9,9 +9,11 @@
 
 #include <atomic>
 #include <mutex>
+#include <memory>
 #include <thread>
 
 class OutputWorker;
+class RemoteMicrophoneBuffer;
 
 class AudioEngine : public QObject
 {
@@ -27,7 +29,8 @@ public:
                bool preferExclusiveOutputs,
                bool automaticLatencyCompensation,
                const AudioDevice& acousticMicrophone = {},
-               bool continuousAcousticTracking = false);
+               bool continuousAcousticTracking = false,
+               std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone = nullptr);
     void stop();
     void setOutputVolume(const QString& deviceId, int volumePercent);
     void setOutputDelay(const QString& deviceId, int delayMilliseconds);
@@ -51,7 +54,8 @@ private:
              bool preferExclusiveOutputs,
              bool automaticLatencyCompensation,
              AudioDevice acousticMicrophone,
-             bool continuousAcousticTracking);
+             bool continuousAcousticTracking,
+             std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone);
 
     std::atomic_bool stopRequested_{false};
     std::atomic_bool active_{false};

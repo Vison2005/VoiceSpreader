@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets)
+find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Network)
 
 set(VOICESPREADER_SOURCES
     src/main.cpp
@@ -26,6 +26,12 @@ set(VOICESPREADER_SOURCES
     src/latency_calibrator.h
     src/acoustic_drift_tracker.cpp
     src/acoustic_drift_tracker.h
+    src/remote_microphone_buffer.cpp
+    src/remote_microphone_buffer.h
+    src/phone_pairing_server.cpp
+    src/phone_pairing_server.h
+    src/pairing_qr_code.cpp
+    src/pairing_qr_code.h
     src/output_worker.cpp
     src/output_worker.h
     src/audio_engine.cpp
@@ -49,6 +55,7 @@ endif()
 
 target_link_libraries(VoiceSpreader PRIVATE
     Qt5::Widgets
+    Qt5::Network
     ole32
     propsys
     avrt
@@ -77,4 +84,28 @@ if(BUILD_TESTING)
         target_compile_options(CalibrationSignalTest PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME CalibrationSignalTest COMMAND CalibrationSignalTest)
+
+    add_executable(PairingQrCodeTest
+        tests/pairing_qr_code_test.cpp
+        src/pairing_qr_code.cpp
+        src/pairing_qr_code.h
+    )
+    if(MSVC)
+        target_compile_options(PairingQrCodeTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    target_link_libraries(PairingQrCodeTest PRIVATE Qt5::Widgets)
+    add_test(NAME PairingQrCodeTest COMMAND PairingQrCodeTest)
+
+    add_executable(PhonePairingServerTest
+        tests/phone_pairing_server_test.cpp
+        src/phone_pairing_server.cpp
+        src/phone_pairing_server.h
+        src/remote_microphone_buffer.cpp
+        src/remote_microphone_buffer.h
+    )
+    if(MSVC)
+        target_compile_options(PhonePairingServerTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    target_link_libraries(PhonePairingServerTest PRIVATE Qt5::Network)
+    add_test(NAME PhonePairingServerTest COMMAND PhonePairingServerTest)
 endif()
