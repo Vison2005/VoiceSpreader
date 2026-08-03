@@ -15,6 +15,9 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPalette>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPen>
 #include <QPushButton>
 #include <QPixmap>
 #include <QScrollArea>
@@ -27,6 +30,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <cmath>
+
 namespace
 {
 QLabel* createSectionTitle(const QString& text, QWidget* parent)
@@ -34,6 +39,106 @@ QLabel* createSectionTitle(const QString& text, QWidget* parent)
     auto* label = new QLabel(text, parent);
     label->setObjectName(QStringLiteral("SectionTitle"));
     return label;
+}
+
+QToolButton* createHelpButton(const QString& toolTip, QWidget* parent)
+{
+    auto* button = new QToolButton(parent);
+    button->setObjectName(QStringLiteral("HelpButton"));
+    button->setText(QStringLiteral("?"));
+    button->setToolTip(toolTip);
+    button->setAccessibleName(QStringLiteral("查看说明"));
+    button->setCursor(Qt::WhatsThisCursor);
+    button->setFixedSize(20, 20);
+    return button;
+}
+
+QIcon createQrIcon(bool darkTheme)
+{
+    QPixmap pixmap(36, 36);
+    pixmap.setDevicePixelRatio(2.0);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    const QColor color(darkTheme ? QStringLiteral("#EAF4F8")
+                                 : QStringLiteral("#112E81"));
+    painter.setPen(QPen(color, 1.5));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(QRectF(1.5, 1.5, 5.0, 5.0));
+    painter.drawRect(QRectF(11.5, 1.5, 5.0, 5.0));
+    painter.drawRect(QRectF(1.5, 11.5, 5.0, 5.0));
+    painter.fillRect(QRectF(3.0, 3.0, 2.0, 2.0), color);
+    painter.fillRect(QRectF(13.0, 3.0, 2.0, 2.0), color);
+    painter.fillRect(QRectF(3.0, 13.0, 2.0, 2.0), color);
+    painter.fillRect(QRectF(9.0, 9.0, 2.0, 2.0), color);
+    painter.fillRect(QRectF(13.0, 9.0, 4.0, 2.0), color);
+    painter.fillRect(QRectF(9.0, 13.0, 2.0, 4.0), color);
+    painter.fillRect(QRectF(13.0, 13.0, 2.0, 2.0), color);
+    painter.fillRect(QRectF(16.0, 15.0, 1.0, 2.0), color);
+    return QIcon(pixmap);
+}
+
+QIcon createPhoneStatusIcon(int connectionState, bool darkTheme)
+{
+    QPixmap pixmap(40, 40);
+    pixmap.setDevicePixelRatio(2.0);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor outline(darkTheme ? QStringLiteral("#EAF4F8")
+                                   : QStringLiteral("#112E81"));
+    painter.setPen(QPen(outline, 1.4));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRoundedRect(QRectF(4.0, 1.5, 10.5, 16.5), 2.0, 2.0);
+    painter.drawLine(QPointF(7.0, 4.0), QPointF(11.5, 4.0));
+    painter.drawEllipse(QPointF(9.25, 15.5), 0.7, 0.7);
+
+    QColor statusColor(QStringLiteral("#98A6B5"));
+    if (connectionState == 1) {
+        statusColor = QColor(QStringLiteral("#38B26D"));
+    } else if (connectionState == 2) {
+        statusColor = QColor(QStringLiteral("#E05252"));
+    }
+    painter.setPen(QPen(darkTheme ? QColor(QStringLiteral("#07142F")) : Qt::white, 1.2));
+    painter.setBrush(statusColor);
+    painter.drawEllipse(QPointF(14.5, 14.0), 3.0, 3.0);
+    return QIcon(pixmap);
+}
+
+QIcon createThemeIcon(bool darkTheme)
+{
+    QPixmap pixmap(40, 40);
+    pixmap.setDevicePixelRatio(2.0);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor color(darkTheme ? QStringLiteral("#F6D365")
+                                 : QStringLiteral("#112E81"));
+    painter.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap));
+    if (darkTheme) {
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(10.0, 10.0), 3.5, 3.5);
+        for (int index = 0; index < 8; ++index) {
+            const double angle = index * 3.14159265358979323846 / 4.0;
+            const QPointF inner(10.0 + std::cos(angle) * 6.0,
+                                10.0 + std::sin(angle) * 6.0);
+            const QPointF outer(10.0 + std::cos(angle) * 8.0,
+                                10.0 + std::sin(angle) * 8.0);
+            painter.drawLine(inner, outer);
+        }
+    } else {
+        QPainterPath moon;
+        moon.addEllipse(QRectF(3.0, 2.0, 14.0, 16.0));
+        QPainterPath cutout;
+        cutout.addEllipse(QRectF(8.0, 0.0, 12.0, 14.0));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawPath(moon.subtracted(cutout));
+    }
+    return QIcon(pixmap);
 }
 
 void refreshDynamicStyle(QWidget* widget)
@@ -53,7 +158,7 @@ MainWindow::MainWindow(QWidget* parent)
     , calibrator_(this)
     , phonePairingServer_(this)
 {
-    setWindowTitle(QStringLiteral("VoiceSpreader - 多设备音频同步"));
+    setWindowTitle(QStringLiteral("VoiceSpreader"));
     setWindowIcon(QIcon(QStringLiteral(":/assets/app.png")));
     setMinimumSize(980, 680);
     resize(1120, 760);
@@ -61,42 +166,53 @@ MainWindow::MainWindow(QWidget* parent)
     auto* root = new QWidget(this);
     root->setObjectName(QStringLiteral("Root"));
     auto* rootLayout = new QVBoxLayout(root);
-    rootLayout->setContentsMargins(24, 20, 24, 20);
-    rootLayout->setSpacing(16);
+    rootLayout->setContentsMargins(24, 16, 24, 18);
+    rootLayout->setSpacing(14);
 
     auto* headerLayout = new QHBoxLayout();
-    headerLayout->setSpacing(14);
+    headerLayout->setSpacing(10);
 
     auto* brandIcon = new QLabel(root);
     brandIcon->setObjectName(QStringLiteral("BrandIcon"));
-    brandIcon->setFixedSize(54, 54);
+    brandIcon->setFixedSize(50, 50);
     brandIcon->setAlignment(Qt::AlignCenter);
     brandIcon->setPixmap(
         QPixmap(QStringLiteral(":/assets/app.png")).scaled(
-            48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            44, 44, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 
-    auto* brandLayout = new QVBoxLayout();
-    brandLayout->setSpacing(2);
-
-    auto* eyebrow = new QLabel(QStringLiteral("LOCAL AUDIO ROUTER"), root);
-    eyebrow->setObjectName(QStringLiteral("Eyebrow"));
     auto* title = new QLabel(QStringLiteral("VoiceSpreader"), root);
     title->setObjectName(QStringLiteral("AppTitle"));
-    auto* subtitle = new QLabel(
-        QStringLiteral("低延迟 WASAPI 多设备分发 · 每台设备独立音量与同步补偿"), root);
-    subtitle->setObjectName(QStringLiteral("MutedText"));
-    brandLayout->addWidget(eyebrow);
-    brandLayout->addWidget(title);
-    brandLayout->addWidget(subtitle);
+
+    phoneMicrophoneButton_ = new QToolButton(root);
+    phoneMicrophoneButton_->setObjectName(QStringLiteral("PhoneButton"));
+    phoneMicrophoneButton_->setText(QStringLiteral("手机"));
+    phoneMicrophoneButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    phoneMicrophoneButton_->setIconSize(QSize(20, 20));
+    phoneMicrophoneButton_->setCheckable(true);
+    phoneMicrophoneButton_->setCursor(Qt::PointingHandCursor);
+    phoneMicrophoneButton_->setMinimumSize(84, 38);
+    phoneMicrophoneButton_->setEnabled(false);
+
+    phonePairButton_ = new QToolButton(root);
+    phonePairButton_->setObjectName(QStringLiteral("HeaderToolButton"));
+    phonePairButton_->setIconSize(QSize(18, 18));
+    phonePairButton_->setToolTip(QStringLiteral("与手机配对"));
+    phonePairButton_->setAccessibleName(QStringLiteral("打开手机配对二维码"));
+    phonePairButton_->setCursor(Qt::PointingHandCursor);
+    phonePairButton_->setFixedSize(42, 38);
 
     themeButton_ = new QToolButton(root);
     themeButton_->setObjectName(QStringLiteral("ThemeButton"));
+    themeButton_->setIconSize(QSize(20, 20));
     themeButton_->setCursor(Qt::PointingHandCursor);
-    themeButton_->setFixedHeight(36);
+    themeButton_->setFixedSize(42, 38);
 
     headerLayout->addWidget(brandIcon, 0, Qt::AlignVCenter);
-    headerLayout->addLayout(brandLayout, 1);
-    headerLayout->addWidget(themeButton_, 0, Qt::AlignTop);
+    headerLayout->addWidget(title, 0, Qt::AlignVCenter);
+    headerLayout->addStretch();
+    headerLayout->addWidget(phoneMicrophoneButton_, 0, Qt::AlignVCenter);
+    headerLayout->addWidget(phonePairButton_, 0, Qt::AlignVCenter);
+    headerLayout->addWidget(themeButton_, 0, Qt::AlignVCenter);
     rootLayout->addLayout(headerLayout);
 
     auto* contentLayout = new QHBoxLayout();
@@ -116,10 +232,10 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* sourceHeader = new QHBoxLayout();
     sourceHeader->addWidget(createSectionTitle(QStringLiteral("音频来源"), sourceCard));
+    sourceHeader->addWidget(createHelpButton(
+        QStringLiteral("物理源模式：该设备由 Windows 直接发声，副输出无法比它更早；明显不同步时建议改用虚拟音频源。"),
+        sourceCard));
     sourceHeader->addStretch();
-    auto* sourceTag = new QLabel(QStringLiteral("WASAPI LOOPBACK"), sourceCard);
-    sourceTag->setObjectName(QStringLiteral("Tag"));
-    sourceHeader->addWidget(sourceTag);
     sourceLayout->addLayout(sourceHeader);
 
     auto* sourceControls = new QHBoxLayout();
@@ -134,19 +250,14 @@ MainWindow::MainWindow(QWidget* parent)
     sourceControls->addWidget(refreshButton_);
     sourceLayout->addLayout(sourceControls);
 
-    sourceHintLabel_ = new QLabel(sourceCard);
-    sourceHintLabel_->setObjectName(QStringLiteral("SourceHint"));
-    sourceHintLabel_->setWordWrap(true);
-    sourceLayout->addWidget(sourceHintLabel_);
-
     auto* calibrationHeader = new QHBoxLayout();
-    auto* calibrationTitle = new QLabel(QStringLiteral("声学校准麦克风"), sourceCard);
+    auto* calibrationTitle = new QLabel(QStringLiteral("校准麦克风"), sourceCard);
     calibrationTitle->setObjectName(QStringLiteral("ControlLabel"));
     calibrationHeader->addWidget(calibrationTitle);
+    calibrationHeader->addWidget(createHelpButton(
+        QStringLiteral("把麦克风放在听音位置；校准会依次播放短扫频并自动回填设备补偿。"),
+        sourceCard));
     calibrationHeader->addStretch();
-    auto* calibrationTag = new QLabel(QStringLiteral("ACOUSTIC PROBE"), sourceCard);
-    calibrationTag->setObjectName(QStringLiteral("Tag"));
-    calibrationHeader->addWidget(calibrationTag);
     sourceLayout->addLayout(calibrationHeader);
 
     auto* calibrationControls = new QHBoxLayout();
@@ -161,41 +272,11 @@ MainWindow::MainWindow(QWidget* parent)
     calibrationControls->addWidget(calibrateButton_);
     sourceLayout->addLayout(calibrationControls);
 
-    calibrationHintLabel_ = new QLabel(
-        QStringLiteral("把麦克风放在听音位置；校准会依次播放短扫频并自动回填设备补偿。"),
-        sourceCard);
-    calibrationHintLabel_->setObjectName(QStringLiteral("MutedText"));
+    calibrationHintLabel_ = new QLabel(sourceCard);
+    calibrationHintLabel_->setObjectName(QStringLiteral("CalibrationStatus"));
     calibrationHintLabel_->setWordWrap(true);
+    calibrationHintLabel_->setVisible(false);
     sourceLayout->addWidget(calibrationHintLabel_);
-
-    auto* phoneHeader = new QHBoxLayout();
-    auto* phoneTitle = new QLabel(QStringLiteral("手机麦克风"), sourceCard);
-    phoneTitle->setObjectName(QStringLiteral("ControlLabel"));
-    phoneHeader->addWidget(phoneTitle);
-    phoneHeader->addStretch();
-    auto* phoneTag = new QLabel(QStringLiteral("ANDROID · LAN"), sourceCard);
-    phoneTag->setObjectName(QStringLiteral("Tag"));
-    phoneHeader->addWidget(phoneTag);
-    sourceLayout->addLayout(phoneHeader);
-
-    auto* phoneControls = new QHBoxLayout();
-    phoneStatusLabel_ = new QLabel(QStringLiteral("配对服务正在初始化"), sourceCard);
-    phoneStatusLabel_->setObjectName(QStringLiteral("PhoneStatus"));
-    phoneStatusLabel_->setWordWrap(true);
-    phonePairButton_ = new QPushButton(QStringLiteral("配对手机"), sourceCard);
-    phonePairButton_->setObjectName(QStringLiteral("SecondaryButton"));
-    phonePairButton_->setMinimumHeight(36);
-    phoneControls->addWidget(phoneStatusLabel_, 1);
-    phoneControls->addWidget(phonePairButton_);
-    sourceLayout->addLayout(phoneControls);
-
-    usePhoneMicrophoneCheck_ = new QCheckBox(
-        QStringLiteral("连续声学跟踪使用手机麦克风"), sourceCard);
-    usePhoneMicrophoneCheck_->setEnabled(false);
-    sourceLayout->addWidget(usePhoneMicrophoneCheck_);
-    phoneLevelLabel_ = new QLabel(QStringLiteral("手机麦克风电平：未连接"), sourceCard);
-    phoneLevelLabel_->setObjectName(QStringLiteral("MutedText"));
-    sourceLayout->addWidget(phoneLevelLabel_);
     leftLayout->addWidget(sourceCard);
 
     auto* outputCard = new QFrame(leftColumn);
@@ -238,23 +319,23 @@ MainWindow::MainWindow(QWidget* parent)
     syncCard->setObjectName(QStringLiteral("Card"));
     auto* syncLayout = new QVBoxLayout(syncCard);
     syncLayout->setContentsMargins(18, 16, 18, 16);
-    syncLayout->setSpacing(13);
-    syncLayout->addWidget(createSectionTitle(QStringLiteral("同步引擎"), syncCard));
-
-    auto* modeBadge = new QLabel(QStringLiteral("IAudioClient3 低延迟优先"), syncCard);
-    modeBadge->setObjectName(QStringLiteral("AccentBadge"));
-    syncLayout->addWidget(modeBadge, 0, Qt::AlignLeft);
+    syncLayout->setSpacing(12);
+    syncLayout->addWidget(createSectionTitle(QStringLiteral("同步设置"), syncCard));
 
     auto* bufferLabelLayout = new QHBoxLayout();
-    auto* bufferTitle = new QLabel(QStringLiteral("实时同步余量"), syncCard);
+    auto* bufferTitle = new QLabel(QStringLiteral("全局延迟"), syncCard);
     bufferTitle->setObjectName(QStringLiteral("ControlLabel"));
+    bufferLabelLayout->addWidget(bufferTitle);
+    bufferLabelLayout->addWidget(createHelpButton(
+        QStringLiteral("播放中也可调整。建议从 5 ms 开始；若有爆音，每次增加 2–5 ms。"),
+        syncCard));
     bufferSpin_ = new QSpinBox(syncCard);
     bufferSpin_->setRange(2, 100);
     bufferSpin_->setSingleStep(1);
     bufferSpin_->setValue(5);
     bufferSpin_->setSuffix(QStringLiteral(" ms"));
-    bufferSpin_->setFixedWidth(92);
-    bufferLabelLayout->addWidget(bufferTitle);
+    bufferSpin_->setFixedWidth(104);
+    bufferSpin_->setMinimumHeight(36);
     bufferLabelLayout->addStretch();
     bufferLabelLayout->addWidget(bufferSpin_);
     syncLayout->addLayout(bufferLabelLayout);
@@ -265,51 +346,49 @@ MainWindow::MainWindow(QWidget* parent)
     bufferSlider_->setSingleStep(1);
     syncLayout->addWidget(bufferSlider_);
 
-    auto* bufferHint = new QLabel(
-        QStringLiteral("播放中也可调整。建议从 5 ms 开始；若有爆音，每次增加 2–5 ms。"), syncCard);
-    bufferHint->setObjectName(QStringLiteral("MutedText"));
-    bufferHint->setWordWrap(true);
-    syncLayout->addWidget(bufferHint);
+    auto* optionsLayout = new QHBoxLayout();
+    optionsLayout->setSpacing(6);
 
-    automaticLatencyCheck_ = new QCheckBox(QStringLiteral("自动补偿设备报告的流延迟"), syncCard);
+    automaticLatencyCheck_ = new QCheckBox(QStringLiteral("自动补偿"), syncCard);
     automaticLatencyCheck_->setChecked(true);
-    syncLayout->addWidget(automaticLatencyCheck_);
-
-    continuousAcousticCheck_ = new QCheckBox(
-        QStringLiteral("播放中自适应声学跟踪"), syncCard);
-    continuousAcousticCheck_->setChecked(true);
-    continuousAcousticCheck_->setToolTip(
-        QStringLiteral("逐台发送近超声探针；设备不支持时自动切换到由节目声掩蔽的低电平扩频探针。"));
-    syncLayout->addWidget(continuousAcousticCheck_);
-
-    auto* acousticHint = new QLabel(
-        QStringLiteral("优先近超声；检测失败自动改用低电平扩频。所有探针仅在实时节目电平足以掩蔽时发送。"),
+    auto* automaticHelp = createHelpButton(
+        QStringLiteral("根据 Windows 音频端点报告的流延迟，自动延后较快设备；手动补偿仍会叠加。"),
         syncCard);
-    acousticHint->setObjectName(QStringLiteral("MutedText"));
-    acousticHint->setWordWrap(true);
-    syncLayout->addWidget(acousticHint);
+    auto* automaticLayout = new QHBoxLayout();
+    automaticLayout->setSpacing(2);
+    automaticLayout->addWidget(automaticLatencyCheck_);
+    automaticLayout->addWidget(automaticHelp);
+    optionsLayout->addLayout(automaticLayout);
+
+    continuousAcousticCheck_ = new QCheckBox(QStringLiteral("自同步"), syncCard);
+    continuousAcousticCheck_->setChecked(true);
+    auto* acousticHelp = createHelpButton(
+        QStringLiteral("播放中使用自适应声学探针复核设备间漂移；仅在节目声足以掩蔽探针时发送。"),
+        syncCard);
+    auto* acousticLayout = new QHBoxLayout();
+    acousticLayout->setSpacing(2);
+    acousticLayout->addWidget(continuousAcousticCheck_);
+    acousticLayout->addWidget(acousticHelp);
+    optionsLayout->addLayout(acousticLayout);
+
+    exclusiveModeCheck_ = new QCheckBox(QStringLiteral("独占输出"), syncCard);
+    exclusiveModeCheck_->setChecked(false);
+    auto* exclusiveHelp = createHelpButton(
+        QStringLiteral("绕过共享混音以降低输出延迟；同一驱动的多个端点可能互斥，仅建议独立物理声卡使用。"),
+        syncCard);
+    auto* exclusiveLayout = new QHBoxLayout();
+    exclusiveLayout->setSpacing(2);
+    exclusiveLayout->addWidget(exclusiveModeCheck_);
+    exclusiveLayout->addWidget(exclusiveHelp);
+    optionsLayout->addLayout(exclusiveLayout);
+    optionsLayout->addStretch();
+    syncLayout->addLayout(optionsLayout);
 
     programLevelLabel_ = new QLabel(
         QStringLiteral("实时节目电平：未监测 · 探针暂停"), syncCard);
     programLevelLabel_->setObjectName(QStringLiteral("ProgramLevel"));
     programLevelLabel_->setProperty("active", false);
     syncLayout->addWidget(programLevelLabel_);
-
-    exclusiveModeCheck_ = new QCheckBox(QStringLiteral("实验性：优先独占输出"), syncCard);
-    exclusiveModeCheck_->setChecked(false);
-    syncLayout->addWidget(exclusiveModeCheck_);
-
-    auto* exclusiveHint = new QLabel(
-        QStringLiteral("同一驱动的多个端点可能互斥；仅建议互相独立的物理声卡尝试。"), syncCard);
-    exclusiveHint->setObjectName(QStringLiteral("MutedText"));
-    exclusiveHint->setWordWrap(true);
-    syncLayout->addWidget(exclusiveHint);
-
-    auto* autoHint = new QLabel(
-        QStringLiteral("会把较快的副输出延后到最慢副输出；手动延迟仍会叠加。"), syncCard);
-    autoHint->setObjectName(QStringLiteral("MutedText"));
-    autoHint->setWordWrap(true);
-    syncLayout->addWidget(autoHint);
     rightLayout->addWidget(syncCard);
 
     auto* logCard = new QFrame(rightColumn);
@@ -342,16 +421,11 @@ MainWindow::MainWindow(QWidget* parent)
     startButton_ = new QPushButton(QStringLiteral("开始同步"), actionBar);
     startButton_->setObjectName(QStringLiteral("PrimaryButton"));
     startButton_->setCursor(Qt::PointingHandCursor);
-    startButton_->setMinimumSize(132, 42);
-    stopButton_ = new QPushButton(QStringLiteral("停止"), actionBar);
-    stopButton_->setObjectName(QStringLiteral("SecondaryButton"));
-    stopButton_->setCursor(Qt::PointingHandCursor);
-    stopButton_->setMinimumSize(88, 42);
-    stopButton_->setEnabled(false);
+    startButton_->setMinimumSize(140, 42);
+    startButton_->setProperty("running", false);
     actionLayout->addWidget(stateLabel_);
     actionLayout->addWidget(stateHint);
     actionLayout->addStretch();
-    actionLayout->addWidget(stopButton_);
     actionLayout->addWidget(startButton_);
     rootLayout->addWidget(actionBar);
 
@@ -361,16 +435,19 @@ MainWindow::MainWindow(QWidget* parent)
     connect(refreshButton_, &QPushButton::clicked, this, &MainWindow::refreshDevices);
     connect(captureCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::rebuildOutputCards);
-    connect(captureCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, &MainWindow::updateSourceHint);
     connect(bufferSlider_, &QSlider::valueChanged, bufferSpin_, &QSpinBox::setValue);
     connect(bufferSpin_, qOverload<int>(&QSpinBox::valueChanged), bufferSlider_, &QSlider::setValue);
     connect(bufferSpin_, qOverload<int>(&QSpinBox::valueChanged), this,
             [this](int value) {
                 engine_.setSynchronizationMargin(value);
             });
-    connect(startButton_, &QPushButton::clicked, this, &MainWindow::startAudio);
-    connect(stopButton_, &QPushButton::clicked, this, &MainWindow::stopAudio);
+    connect(startButton_, &QPushButton::clicked, this, [this] {
+        if (engine_.isActive()) {
+            stopAudio();
+        } else {
+            startAudio();
+        }
+    });
     connect(calibrateButton_, &QPushButton::clicked,
             this, &MainWindow::startOrStopCalibration);
     connect(&engine_, &AudioEngine::statusChanged, this, &MainWindow::appendStatus);
@@ -380,8 +457,10 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::updateAcousticCorrection);
     connect(&engine_, &AudioEngine::programLevelChanged,
             this, &MainWindow::updateProgramLevel);
-    connect(phonePairButton_, &QPushButton::clicked,
+    connect(phonePairButton_, &QToolButton::clicked,
             this, &MainWindow::showPhonePairing);
+    connect(phoneMicrophoneButton_, &QToolButton::toggled, this,
+            [this](bool) { updatePhoneButtonAppearance(); });
     connect(&phonePairingServer_, &PhonePairingServer::statusChanged,
             this, &MainWindow::appendStatus);
     connect(&phonePairingServer_, &PhonePairingServer::connectionChanged,
@@ -401,12 +480,12 @@ MainWindow::MainWindow(QWidget* parent)
     refreshDevices();
     QString pairingError;
     if (phonePairingServer_.start(&pairingError)) {
-        phoneStatusLabel_->setText(
-            QStringLiteral("未连接 · 配对码 %1").arg(phonePairingServer_.pairingCode()));
+        phoneConnectionState_ = 0;
     } else {
-        phoneStatusLabel_->setText(QStringLiteral("配对服务启动失败"));
+        phoneConnectionState_ = 2;
         appendStatus(QStringLiteral("手机配对服务启动失败：%1").arg(pairingError));
     }
+    updatePhoneButtonAppearance();
 }
 
 MainWindow::~MainWindow()
@@ -462,7 +541,6 @@ void MainWindow::refreshDevices()
         microphoneCombo_->setCurrentIndex(selectedMicrophoneIndex);
     }
     rebuildOutputCards();
-    updateSourceHint();
 
     if (!renderError.isEmpty()) {
         showEngineError(renderError);
@@ -547,7 +625,8 @@ void MainWindow::rebuildOutputCards()
         delaySpin->setSingleStep(1);
         delaySpin->setValue(savedDelay);
         delaySpin->setSuffix(QStringLiteral(" ms"));
-        delaySpin->setFixedWidth(96);
+        delaySpin->setFixedWidth(104);
+        delaySpin->setMinimumHeight(34);
         delaySpin->setToolTip(QStringLiteral("播放过程中可调整；较大的变化会平滑追踪，避免爆音。"));
 
         controls->addWidget(volumeTitle);
@@ -617,7 +696,7 @@ void MainWindow::startAudio()
     const bool continuousTracking = continuousAcousticCheck_->isChecked()
                                     && outputs.size() >= 2;
     const bool usePhoneMicrophone = continuousTracking
-                                    && usePhoneMicrophoneCheck_->isChecked()
+                                    && phoneMicrophoneButton_->isChecked()
                                     && phonePairingServer_.phoneConnected();
     if (continuousTracking && !usePhoneMicrophone && microphone.id.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("无法启动声学跟踪"),
@@ -651,7 +730,10 @@ void MainWindow::startAudio()
     }
 
     setControlsEnabled(false);
-    stopButton_->setEnabled(true);
+    startButton_->setEnabled(true);
+    startButton_->setText(QStringLiteral("停止同步"));
+    startButton_->setProperty("running", true);
+    refreshDynamicStyle(startButton_);
     stateLabel_->setText(QStringLiteral("正在初始化"));
     stateLabel_->setProperty("running", true);
     refreshDynamicStyle(stateLabel_);
@@ -666,7 +748,7 @@ void MainWindow::startAudio()
 void MainWindow::stopAudio()
 {
     stateLabel_->setText(QStringLiteral("正在停止"));
-    stopButton_->setEnabled(false);
+    startButton_->setEnabled(false);
     engine_.stop();
 }
 
@@ -722,12 +804,12 @@ void MainWindow::startOrStopCalibration()
     setControlsEnabled(false);
     calibrateButton_->setEnabled(true);
     calibrateButton_->setText(QStringLiteral("停止校准"));
-    stopButton_->setEnabled(false);
     stateLabel_->setText(QStringLiteral("声学校准中"));
     stateLabel_->setProperty("running", true);
     refreshDynamicStyle(stateLabel_);
     calibrationHintLabel_->setText(
         QStringLiteral("正在测量：请保持环境安静，不要移动麦克风。"));
+    calibrationHintLabel_->setVisible(true);
     appendStatus(QStringLiteral("准备校准 %1 台输出设备；麦克风应放在实际听音位置")
                      .arg(outputs.size()));
 }
@@ -754,6 +836,7 @@ void MainWindow::applyCalibrationResults()
     calibrationHintLabel_->setText(
         QStringLiteral("校准完成：已向 %1 台设备回填相对延迟补偿，可直接开始同步。")
             .arg(appliedCount));
+    calibrationHintLabel_->setVisible(true);
 }
 
 void MainWindow::updateCalibrationRunningState(bool running)
@@ -769,7 +852,6 @@ void MainWindow::updateCalibrationRunningState(bool running)
     stateLabel_->setProperty("running", false);
     refreshDynamicStyle(stateLabel_);
     setControlsEnabled(true);
-    stopButton_->setEnabled(false);
 }
 
 void MainWindow::showCalibrationError(const QString& message)
@@ -777,6 +859,7 @@ void MainWindow::showCalibrationError(const QString& message)
     appendStatus(QStringLiteral("校准错误：%1").arg(message));
     calibrationHintLabel_->setText(
         QStringLiteral("校准失败：请检查麦克风、扬声器音量和环境噪声后重试。"));
+    calibrationHintLabel_->setVisible(true);
     QMessageBox::critical(this, QStringLiteral("声学校准错误"), message);
 }
 
@@ -814,15 +897,19 @@ void MainWindow::showPhonePairing()
     if (phonePairingServer_.serverPort() == 0) {
         QString error;
         if (!phonePairingServer_.start(&error)) {
+            phoneConnectionState_ = 2;
+            updatePhoneButtonAppearance();
             QMessageBox::critical(this,
                                   QStringLiteral("手机配对失败"),
                                   QStringLiteral("无法启动配对服务：%1").arg(error));
             return;
         }
+        phoneConnectionState_ = 0;
+        updatePhoneButtonAppearance();
     }
 
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("配对 Android 手机"));
+    dialog.setWindowTitle(QStringLiteral("VoiceSpreader 手机配对"));
     dialog.setMinimumWidth(430);
     auto* layout = new QVBoxLayout(&dialog);
     auto* title = new QLabel(QStringLiteral("用 VoiceSpreader Android 扫描二维码"), &dialog);
@@ -840,7 +927,9 @@ void MainWindow::showPhonePairing()
     layout->addLayout(addressControls);
 
     auto* qrLabel = new QLabel(&dialog);
+    qrLabel->setObjectName(QStringLiteral("QrCodeSurface"));
     qrLabel->setAlignment(Qt::AlignCenter);
+    qrLabel->setContentsMargins(14, 14, 14, 14);
     auto refreshQr = [&] {
         const QImage qr = createPairingQrCode(phonePairingServer_.pairingPayload(), 7);
         qrLabel->setPixmap(QPixmap::fromImage(qr));
@@ -852,6 +941,7 @@ void MainWindow::showPhonePairing()
         QStringLiteral("或在手机输入配对码：<b style='font-size:24px'>%1</b>")
             .arg(phonePairingServer_.pairingCode()),
         &dialog);
+    codeLabel->setObjectName(QStringLiteral("PairingCode"));
     codeLabel->setAlignment(Qt::AlignCenter);
     layout->addWidget(codeLabel);
     auto* addressLabel = new QLabel(
@@ -890,8 +980,7 @@ void MainWindow::showPhonePairing()
         codeLabel->setText(
             QStringLiteral("或在手机输入配对码：<b style='font-size:24px'>%1</b>")
                 .arg(phonePairingServer_.pairingCode()));
-        phoneStatusLabel_->setText(
-            QStringLiteral("未连接 · 配对码 %1").arg(phonePairingServer_.pairingCode()));
+        updatePhoneButtonAppearance();
     });
     connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
     connect(&phonePairingServer_, &PhonePairingServer::connectionChanged,
@@ -906,23 +995,56 @@ void MainWindow::showPhonePairing()
 void MainWindow::updatePhoneConnection(bool connected, const QString& phoneName)
 {
     if (connected) {
-        phoneStatusLabel_->setText(QStringLiteral("已连接：%1").arg(phoneName));
-        usePhoneMicrophoneCheck_->setEnabled(!engine_.isActive());
-        usePhoneMicrophoneCheck_->setChecked(true);
-        phoneLevelLabel_->setText(QStringLiteral("手机麦克风电平：等待采样"));
+        phoneConnectionState_ = 1;
+        connectedPhoneName_ = phoneName;
+        phoneMicrophoneLevelDbfs_ = -160.0;
+        phoneMicrophoneButton_->setChecked(false);
     } else {
-        phoneStatusLabel_->setText(
-            QStringLiteral("未连接 · 配对码 %1").arg(phonePairingServer_.pairingCode()));
-        usePhoneMicrophoneCheck_->setChecked(false);
-        usePhoneMicrophoneCheck_->setEnabled(false);
-        phoneLevelLabel_->setText(QStringLiteral("手机麦克风电平：未连接"));
+        phoneConnectionState_ = 0;
+        connectedPhoneName_.clear();
+        phoneMicrophoneLevelDbfs_ = -160.0;
+        phoneMicrophoneButton_->setChecked(false);
     }
+    updatePhoneButtonAppearance();
 }
 
 void MainWindow::updatePhoneMicrophoneLevel(double levelDbfs)
 {
-    phoneLevelLabel_->setText(
-        QStringLiteral("手机麦克风电平：%1 dBFS").arg(levelDbfs, 0, 'f', 1));
+    phoneMicrophoneLevelDbfs_ = levelDbfs;
+    updatePhoneButtonAppearance();
+}
+
+void MainWindow::updatePhoneButtonAppearance()
+{
+    phoneMicrophoneButton_->setIcon(
+        createPhoneStatusIcon(phoneConnectionState_, darkTheme_));
+    phonePairButton_->setIcon(createQrIcon(darkTheme_));
+    phoneMicrophoneButton_->setProperty("connectionState", phoneConnectionState_);
+
+    if (phoneConnectionState_ == 1) {
+        const QString levelText = phoneMicrophoneLevelDbfs_ <= -150.0
+                                      ? QStringLiteral("等待采样")
+                                      : QStringLiteral("%1 dBFS")
+                                            .arg(phoneMicrophoneLevelDbfs_, 0, 'f', 1);
+        phoneMicrophoneButton_->setToolTip(
+            QStringLiteral("已连接：%1\n手机麦克风：%2\n%3")
+                .arg(connectedPhoneName_,
+                     levelText,
+                     phoneMicrophoneButton_->isChecked()
+                         ? QStringLiteral("当前用于自同步；点击停用")
+                         : QStringLiteral("当前未使用；点击启用")));
+    } else if (phoneConnectionState_ == 2) {
+        phoneMicrophoneButton_->setToolTip(
+            QStringLiteral("手机配对服务异常；点击右侧二维码按钮重试。"));
+    } else {
+        phoneMicrophoneButton_->setToolTip(
+            QStringLiteral("手机未连接；点击右侧二维码按钮进行配对。"));
+    }
+
+    phoneMicrophoneButton_->setEnabled(phoneConnectionState_ == 1
+                                       && !engine_.isActive()
+                                       && !calibrator_.isActive());
+    refreshDynamicStyle(phoneMicrophoneButton_);
 }
 
 void MainWindow::appendStatus(const QString& message)
@@ -940,16 +1062,19 @@ void MainWindow::showEngineError(const QString& message)
 
 void MainWindow::updateRunningState(bool running)
 {
+    const bool active = running || engine_.isActive();
     stateLabel_->setText(running ? QStringLiteral("正在同步") : QStringLiteral("未启动"));
     stateLabel_->setProperty("running", running);
     refreshDynamicStyle(stateLabel_);
-    setControlsEnabled(!running && !engine_.isActive());
-    stopButton_->setEnabled(running || engine_.isActive());
+    setControlsEnabled(!active);
+    startButton_->setText(active ? QStringLiteral("停止同步") : QStringLiteral("开始同步"));
+    startButton_->setProperty("running", active);
+    startButton_->setEnabled(active || !calibrator_.isActive());
+    refreshDynamicStyle(startButton_);
 
-    if (!running && !engine_.isActive()) {
+    if (!active) {
         lockedOutputIds_.clear();
         setControlsEnabled(true);
-        stopButton_->setEnabled(false);
         programLevelLabel_->setText(QStringLiteral("实时节目电平：未监测 · 探针暂停"));
         programLevelLabel_->setProperty("active", false);
         refreshDynamicStyle(programLevelLabel_);
@@ -967,23 +1092,6 @@ void MainWindow::updateSelectionSummary()
     selectionLabel_->setText(count == 0
                                  ? QStringLiteral("未选择设备")
                                  : QStringLiteral("已选择 %1 台").arg(count));
-}
-
-void MainWindow::updateSourceHint()
-{
-    const AudioDevice source = currentCaptureDevice();
-    const bool virtualSource = source.name.contains(QStringLiteral("CABLE"), Qt::CaseInsensitive)
-                               || source.name.contains(QStringLiteral("Virtual"), Qt::CaseInsensitive)
-                               || source.name.contains(QStringLiteral("虚拟"), Qt::CaseInsensitive);
-    sourceHintLabel_->setProperty("virtual", virtualSource);
-    if (virtualSource) {
-        sourceHintLabel_->setText(
-            QStringLiteral("虚拟源模式：所有实体扬声器都可由 VoiceSpreader 统一延迟，设备间更容易对齐。"));
-    } else {
-        sourceHintLabel_->setText(
-            QStringLiteral("物理源模式：该设备由 Windows 直接发声，副输出无法比它更早；明显不同步时建议改用虚拟音频源。"));
-    }
-    refreshDynamicStyle(sourceHintLabel_);
 }
 
 void MainWindow::toggleTheme()
@@ -1040,12 +1148,12 @@ void MainWindow::setControlsEnabled(bool enabled)
     bufferSpin_->setEnabled(enabled || engine_.isActive());
     automaticLatencyCheck_->setEnabled(enabled);
     continuousAcousticCheck_->setEnabled(enabled);
-    usePhoneMicrophoneCheck_->setEnabled(enabled
-                                         && phonePairingServer_.phoneConnected());
+    phoneMicrophoneButton_->setEnabled(enabled
+                                       && phoneConnectionState_ == 1);
     phonePairButton_->setEnabled(enabled);
     exclusiveModeCheck_->setEnabled(enabled);
     refreshButton_->setEnabled(enabled);
-    startButton_->setEnabled(enabled);
+    startButton_->setEnabled(enabled || engine_.isActive());
     calibrateButton_->setEnabled(enabled || calibrator_.isActive());
 
     for (QCheckBox* check : outputChecks_) {
@@ -1062,7 +1170,10 @@ void MainWindow::setControlsEnabled(bool enabled)
 
 void MainWindow::applyTheme()
 {
-    themeButton_->setText(darkTheme_ ? QStringLiteral("浅色模式") : QStringLiteral("深色模式"));
+    themeButton_->setText(QString());
+    themeButton_->setIcon(createThemeIcon(darkTheme_));
+    themeButton_->setToolTip(darkTheme_ ? QStringLiteral("切换到浅色模式")
+                                        : QStringLiteral("切换到深色模式"));
 
     QPalette palette;
     if (darkTheme_) {
@@ -1103,20 +1214,16 @@ QWidget { color: #13213F; font-family: "HarmonyOS Sans SC"; font-size: 13px; }
 QMainWindow, QDialog, QWidget#Root { background: #F3F7FB; }
 QWidget#Transparent { background: transparent; }
 QLabel#BrandIcon { background: #E9F2FC; border: 1px solid #AACCD6; border-radius: 13px; }
-QLabel#Eyebrow { color: #4382DF; font-size: 10px; font-weight: 700; letter-spacing: 2px; }
 QLabel#AppTitle { color: #112E81; font-size: 27px; font-weight: 700; }
 QLabel#SectionTitle { color: #112E81; font-size: 15px; font-weight: 700; }
 QLabel#MutedText { color: #627694; font-size: 12px; }
+QLabel#CalibrationStatus { color: #112E81; background: #EEF5FC; border-radius: 7px; padding: 6px 8px; font-size: 11px; }
 QLabel#ControlLabel { color: #314668; font-weight: 500; }
 QLabel#ValueLabel { color: #112E81; font-weight: 500; }
 QLabel#AcousticState { color: #284F7D; background: #E9F2FC; border: 1px solid #D6E7F0; border-radius: 6px; padding: 4px 7px; font-size: 11px; }
 QLabel#ProgramLevel { color: #49647E; background: #EDF3F7; border-radius: 7px; padding: 5px 8px; font-size: 11px; }
 QLabel#ProgramLevel[active="true"] { color: #112E81; background: #E4EEFC; }
-QLabel#PhoneStatus { color: #315D80; background: #EAF3F7; border-radius: 7px; padding: 6px 8px; }
-QLabel#Tag, QLabel#CountBadge { color: #4647AE; background: #EEF0FF; border: 1px solid #D7DCF5; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700; }
-QLabel#AccentBadge { color: #112E81; background: #E5EEFC; border-radius: 10px; padding: 5px 10px; font-weight: 500; }
-QLabel#SourceHint { color: #112E81; background: #EEF5FC; border: 1px solid #AACCD6; border-radius: 8px; padding: 8px 10px; }
-QLabel#SourceHint[virtual="true"] { color: #4647AE; background: #F0F0FC; border-color: #C9C9EB; }
+QLabel#CountBadge { color: #4647AE; background: #EEF0FF; border: 1px solid #D7DCF5; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700; }
 QLabel#StatusLabel { color: #355270; background: #EAF1F6; border-radius: 11px; padding: 5px 11px; font-weight: 700; }
 QLabel#StatusLabel[running="true"] { color: #112E81; background: #DDEBFB; }
 QFrame#Card, QFrame#ActionBar { background: #FFFFFF; border: 1px solid #D8E5ED; border-radius: 14px; }
@@ -1133,13 +1240,24 @@ QPushButton, QToolButton { border-radius: 8px; padding: 0 15px; font-weight: 500
 QPushButton#PrimaryButton { color: #FFFFFF; background: #112E81; border: 1px solid #112E81; }
 QPushButton#PrimaryButton:hover { background: #4647AE; border-color: #4647AE; }
 QPushButton#PrimaryButton:pressed { background: #0D246A; border-color: #0D246A; }
-QPushButton#SecondaryButton, QToolButton#ThemeButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; }
-QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover { background: #EAF2FA; border-color: #4382DF; }
+QPushButton#PrimaryButton[running="true"] { background: #4647AE; border-color: #4647AE; }
+QPushButton#SecondaryButton, QToolButton#ThemeButton, QToolButton#HeaderToolButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; }
+QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover, QToolButton#HeaderToolButton:hover { background: #EAF2FA; border-color: #4382DF; }
+QToolButton#ThemeButton, QToolButton#HeaderToolButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QToolButton#PhoneButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; border-radius: 10px; padding: 0 10px; font-weight: 500; }
+QToolButton#PhoneButton:hover { background: #EAF2FA; border-color: #4382DF; }
+QToolButton#PhoneButton:checked { color: #FFFFFF; background: #112E81; border-color: #112E81; }
+QToolButton#PhoneButton:checked:disabled { color: #FFFFFF; background: #274A91; border-color: #274A91; }
+QToolButton#PhoneButton[connectionState="2"] { border-color: #E05252; }
+QToolButton#HelpButton { color: #4382DF; background: #F5F9FD; border: 1px solid #AACCD6; border-radius: 10px; padding: 0; font-size: 11px; font-weight: 700; }
+QToolButton#HelpButton:hover { color: #FFFFFF; background: #4382DF; border-color: #4382DF; }
 QPushButton:disabled, QToolButton:disabled { color: #8B9DB0; background: #EDF2F5; border-color: #D9E2E8; }
 QSlider::groove:horizontal { height: 5px; background: #DCE6ED; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: #4382DF; border-radius: 2px; }
 QSlider::handle:horizontal { width: 15px; height: 15px; margin: -5px 0; background: #FFFFFF; border: 2px solid #4647AE; border-radius: 8px; }
 QTextEdit#LogView { color: #314668; background: #F7FAFC; border: 1px solid #D8E5ED; border-radius: 9px; padding: 7px; font-size: 11px; }
+QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #AACCD6; border-radius: 14px; }
+QLabel#PairingCode { color: #112E81; background: #EAF2FA; border-radius: 9px; padding: 8px; }
 QScrollArea#OutputScroll { background: transparent; border: none; }
 QScrollArea#OutputScroll > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { width: 8px; background: transparent; margin: 2px; }
@@ -1154,20 +1272,16 @@ QWidget { color: #EAF4F8; font-family: "HarmonyOS Sans SC"; font-size: 13px; }
 QMainWindow, QDialog, QWidget#Root { background: #07142F; }
 QWidget#Transparent { background: transparent; }
 QLabel#BrandIcon { background: #102A57; border: 1px solid #315D8F; border-radius: 13px; }
-QLabel#Eyebrow { color: #77A9EE; font-size: 10px; font-weight: 700; letter-spacing: 2px; }
 QLabel#AppTitle { color: #F2F7FA; font-size: 27px; font-weight: 700; }
 QLabel#SectionTitle { color: #DCEAF2; font-size: 15px; font-weight: 700; }
 QLabel#MutedText { color: #AACCD6; font-size: 12px; }
+QLabel#CalibrationStatus { color: #C7DDF7; background: #102A50; border-radius: 7px; padding: 6px 8px; font-size: 11px; }
 QLabel#ControlLabel { color: #C5D9E2; font-weight: 500; }
 QLabel#ValueLabel { color: #AFCDF7; font-weight: 500; }
 QLabel#AcousticState { color: #BBD5E1; background: #10284E; border: 1px solid #1E4773; border-radius: 6px; padding: 4px 7px; font-size: 11px; }
 QLabel#ProgramLevel { color: #AACCD6; background: #102542; border-radius: 7px; padding: 5px 8px; font-size: 11px; }
 QLabel#ProgramLevel[active="true"] { color: #D9E9FF; background: #19376F; }
-QLabel#PhoneStatus { color: #B8D5DF; background: #102842; border-radius: 7px; padding: 6px 8px; }
-QLabel#Tag, QLabel#CountBadge { color: #C6C7FF; background: #24265E; border: 1px solid #4647AE; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700; }
-QLabel#AccentBadge { color: #D7E6FA; background: #15356B; border-radius: 10px; padding: 5px 10px; font-weight: 500; }
-QLabel#SourceHint { color: #C7DDF7; background: #102A50; border: 1px solid #315D8F; border-radius: 8px; padding: 8px 10px; }
-QLabel#SourceHint[virtual="true"] { color: #D4D4FF; background: #202458; border-color: #4647AE; }
+QLabel#CountBadge { color: #C6C7FF; background: #24265E; border: 1px solid #4647AE; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700; }
 QLabel#StatusLabel { color: #AACCD6; background: #102542; border-radius: 11px; padding: 5px 11px; font-weight: 700; }
 QLabel#StatusLabel[running="true"] { color: #EAF4F8; background: #112E81; }
 QFrame#Card, QFrame#ActionBar { background: #0D1F3E; border: 1px solid #1E3D64; border-radius: 14px; }
@@ -1184,13 +1298,24 @@ QPushButton, QToolButton { border-radius: 8px; padding: 0 15px; font-weight: 500
 QPushButton#PrimaryButton { color: #FFFFFF; background: #4382DF; border: 1px solid #4382DF; }
 QPushButton#PrimaryButton:hover { background: #5B93E5; border-color: #5B93E5; }
 QPushButton#PrimaryButton:pressed { background: #4647AE; border-color: #4647AE; }
-QPushButton#SecondaryButton, QToolButton#ThemeButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; }
-QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover { background: #173662; border-color: #4382DF; }
+QPushButton#PrimaryButton[running="true"] { background: #4647AE; border-color: #6C6DD0; }
+QPushButton#SecondaryButton, QToolButton#ThemeButton, QToolButton#HeaderToolButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; }
+QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover, QToolButton#HeaderToolButton:hover { background: #173662; border-color: #4382DF; }
+QToolButton#ThemeButton, QToolButton#HeaderToolButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QToolButton#PhoneButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; border-radius: 10px; padding: 0 10px; font-weight: 500; }
+QToolButton#PhoneButton:hover { background: #173662; border-color: #4382DF; }
+QToolButton#PhoneButton:checked { color: #FFFFFF; background: #4647AE; border-color: #7778DE; }
+QToolButton#PhoneButton:checked:disabled { color: #FFFFFF; background: #35368B; border-color: #5556B2; }
+QToolButton#PhoneButton[connectionState="2"] { border-color: #E05252; }
+QToolButton#HelpButton { color: #AACCD6; background: #10284E; border: 1px solid #315377; border-radius: 10px; padding: 0; font-size: 11px; font-weight: 700; }
+QToolButton#HelpButton:hover { color: #FFFFFF; background: #4382DF; border-color: #4382DF; }
 QPushButton:disabled, QToolButton:disabled { color: #6E86A4; background: #0E203B; border-color: #1E3651; }
 QSlider::groove:horizontal { height: 5px; background: #27415F; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: #4382DF; border-radius: 2px; }
 QSlider::handle:horizontal { width: 15px; height: 15px; margin: -5px 0; background: #EAF4F8; border: 2px solid #77A9EE; border-radius: 8px; }
 QTextEdit#LogView { color: #C7DAE4; background: #091A38; border: 1px solid #1E3D64; border-radius: 9px; padding: 7px; font-size: 11px; }
+QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #315377; border-radius: 14px; }
+QLabel#PairingCode { color: #DCEAF2; background: #102A50; border-radius: 9px; padding: 8px; }
 QScrollArea#OutputScroll { background: transparent; border: none; }
 QScrollArea#OutputScroll > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { width: 8px; background: transparent; margin: 2px; }
@@ -1201,4 +1326,5 @@ QToolTip { color: #EAF4F8; background: #10284E; border: 1px solid #4382DF; paddi
 )QSS";
 
     setStyleSheet(QString::fromUtf8(darkTheme_ ? darkStyle : lightStyle));
+    updatePhoneButtonAppearance();
 }

@@ -37,7 +37,6 @@ private slots:
     void showEngineError(const QString& message);
     void updateRunningState(bool running);
     void updateSelectionSummary();
-    void updateSourceHint();
     void toggleTheme();
     void startOrStopCalibration();
     void applyCalibrationResults();
@@ -59,6 +58,7 @@ private:
     QVector<OutputDeviceSettings> selectedOutputDevices() const;
     void setControlsEnabled(bool enabled);
     void applyTheme();
+    void updatePhoneButtonAppearance();
 
     AudioEngine engine_;
     LatencyCalibrator calibrator_;
@@ -75,20 +75,16 @@ private:
     QCheckBox* continuousAcousticCheck_ = nullptr;
     QCheckBox* exclusiveModeCheck_ = nullptr;
     QLabel* selectionLabel_ = nullptr;
-    QLabel* sourceHintLabel_ = nullptr;
     QLabel* stateLabel_ = nullptr;
     QPushButton* refreshButton_ = nullptr;
     QPushButton* calibrateButton_ = nullptr;
     QPushButton* startButton_ = nullptr;
-    QPushButton* stopButton_ = nullptr;
     QToolButton* themeButton_ = nullptr;
+    QToolButton* phoneMicrophoneButton_ = nullptr;
+    QToolButton* phonePairButton_ = nullptr;
     QTextEdit* logView_ = nullptr;
     QLabel* calibrationHintLabel_ = nullptr;
     QLabel* programLevelLabel_ = nullptr;
-    QLabel* phoneStatusLabel_ = nullptr;
-    QLabel* phoneLevelLabel_ = nullptr;
-    QPushButton* phonePairButton_ = nullptr;
-    QCheckBox* usePhoneMicrophoneCheck_ = nullptr;
 
     QHash<QString, QCheckBox*> outputChecks_;
     QHash<QString, QSlider*> volumeSliders_;
@@ -96,5 +92,8 @@ private:
     QHash<QString, QSpinBox*> delaySpinBoxes_;
     QHash<QString, QLabel*> acousticLabels_;
     QSet<QString> lockedOutputIds_;
+    QString connectedPhoneName_;
+    double phoneMicrophoneLevelDbfs_ = -160.0;
+    int phoneConnectionState_ = 0;
     bool darkTheme_ = false;
 };
