@@ -84,6 +84,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Copy-Item -LiteralPath (Join-Path $projectDir 'README.md') -Destination (Join-Path $packageDir 'README.md') -Force
 
+$licenseDir = Join-Path $packageDir 'licenses'
+New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $projectDir 'assets\fonts\HarmonyOS_Sans_LICENSE.txt') `
+    -Destination (Join-Path $licenseDir 'HarmonyOS_Sans_LICENSE.txt') -Force
+
 $exeInfo = Get-Item -LiteralPath $packagedExe
 Write-Host ''
 Write-Host 'Build succeeded.' -ForegroundColor Green

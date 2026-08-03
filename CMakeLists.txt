@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Network)
 
@@ -38,6 +39,8 @@ set(VOICESPREADER_SOURCES
     src/audio_engine.h
     src/main_window.cpp
     src/main_window.h
+    resources.qrc
+    assets/VoiceSpreader.rc
 )
 
 add_executable(VoiceSpreader WIN32 ${VOICESPREADER_SOURCES})

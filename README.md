@@ -2,6 +2,8 @@
 
 VoiceSpreader 是 VoiceSharer 的 C++/Qt 重构项目。当前阶段先实现不依赖 VoiceMeeter 的纯用户态版本：从一个正在播放系统声音的设备进行 WASAPI Loopback 捕获，再把音频分发到多个其他输出设备。
 
+桌面程序使用 HarmonyOS Sans SC 字体，字体版权归 Huawei Device Co., Ltd. 所有，并依照 HarmonyOS Sans Fonts License Agreement 随程序嵌入。完整许可文本位于发行目录的 `licenses/HarmonyOS_Sans_LICENSE.txt`。
+
 ## 当前可用功能
 
 - 枚举 Windows 中所有活动的渲染设备。
@@ -19,7 +21,8 @@ VoiceSpreader 是 VoiceSharer 的 C++/Qt 重构项目。当前阶段先实现不
 - Android 手机可作为远程声学校准位置麦克风：支持二维码或六位码局域网配对，连续回传带绝对采样帧号的 48 kHz PCM16。
 - 连续测量会先积累两轮有效结果，再以每轮最多 2 ms 的速度调整独立“声学自动延迟”；手动补偿仍可实时调节并与其叠加。
 - 可根据设备报告的流延迟自动补偿较快的副输出。
-- 卡片式双栏界面，并支持浅色/深色主题。
+- 使用 VoiceSharer 原应用图标；卡片式双栏界面采用 `#112E81`、`#4647AE`、`#4382DF`、`#AACCD6` 品牌配色，并支持独立设计的浅色/深色主题。
+- 内嵌 HarmonyOS Sans SC 常规、中黑与粗体字重，并启用 Qt 高 DPI 与高分辨率图标支持，改善 Windows 缩放下的文字和图标清晰度。
 - 主设备不会出现在输出列表中，避免程序捕获自己的输出而形成反馈。
 
 当前版本尚未包含：
