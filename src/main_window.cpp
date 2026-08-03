@@ -53,33 +53,7 @@ QToolButton* createHelpButton(const QString& toolTip, QWidget* parent)
     return button;
 }
 
-QIcon createQrIcon(bool darkTheme)
-{
-    QPixmap pixmap(36, 36);
-    pixmap.setDevicePixelRatio(2.0);
-    pixmap.fill(Qt::transparent);
-
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing, false);
-    const QColor color(darkTheme ? QStringLiteral("#EAF4F8")
-                                 : QStringLiteral("#112E81"));
-    painter.setPen(QPen(color, 1.5));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRect(QRectF(1.5, 1.5, 5.0, 5.0));
-    painter.drawRect(QRectF(11.5, 1.5, 5.0, 5.0));
-    painter.drawRect(QRectF(1.5, 11.5, 5.0, 5.0));
-    painter.fillRect(QRectF(3.0, 3.0, 2.0, 2.0), color);
-    painter.fillRect(QRectF(13.0, 3.0, 2.0, 2.0), color);
-    painter.fillRect(QRectF(3.0, 13.0, 2.0, 2.0), color);
-    painter.fillRect(QRectF(9.0, 9.0, 2.0, 2.0), color);
-    painter.fillRect(QRectF(13.0, 9.0, 4.0, 2.0), color);
-    painter.fillRect(QRectF(9.0, 13.0, 2.0, 4.0), color);
-    painter.fillRect(QRectF(13.0, 13.0, 2.0, 2.0), color);
-    painter.fillRect(QRectF(16.0, 15.0, 1.0, 2.0), color);
-    return QIcon(pixmap);
-}
-
-QIcon createPhoneStatusIcon(int connectionState, bool darkTheme)
+QIcon createPhoneStatusIcon(int connectionState, bool darkTheme, bool selected)
 {
     QPixmap pixmap(40, 40);
     pixmap.setDevicePixelRatio(2.0);
@@ -87,8 +61,8 @@ QIcon createPhoneStatusIcon(int connectionState, bool darkTheme)
 
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    const QColor outline(darkTheme ? QStringLiteral("#EAF4F8")
-                                   : QStringLiteral("#112E81"));
+    const QColor outline(selected || darkTheme ? QStringLiteral("#EAF4F8")
+                                               : QStringLiteral("#112E81"));
     painter.setPen(QPen(outline, 1.4));
     painter.setBrush(Qt::NoBrush);
     painter.drawRoundedRect(QRectF(4.0, 1.5, 10.5, 16.5), 2.0, 2.0);
@@ -101,7 +75,10 @@ QIcon createPhoneStatusIcon(int connectionState, bool darkTheme)
     } else if (connectionState == 2) {
         statusColor = QColor(QStringLiteral("#E05252"));
     }
-    painter.setPen(QPen(darkTheme ? QColor(QStringLiteral("#07142F")) : Qt::white, 1.2));
+    const QColor dotBorder(selected ? QStringLiteral("#112E81")
+                                    : darkTheme ? QStringLiteral("#10284E")
+                                                : QStringLiteral("#FFFFFF"));
+    painter.setPen(QPen(dotBorder, 1.2));
     painter.setBrush(statusColor);
     painter.drawEllipse(QPointF(14.5, 14.0), 3.0, 3.0);
     return QIcon(pixmap);
@@ -185,21 +162,12 @@ MainWindow::MainWindow(QWidget* parent)
 
     phoneMicrophoneButton_ = new QToolButton(root);
     phoneMicrophoneButton_->setObjectName(QStringLiteral("PhoneButton"));
-    phoneMicrophoneButton_->setText(QStringLiteral("手机"));
+    phoneMicrophoneButton_->setText(QStringLiteral("连接手机"));
     phoneMicrophoneButton_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     phoneMicrophoneButton_->setIconSize(QSize(20, 20));
     phoneMicrophoneButton_->setCheckable(true);
     phoneMicrophoneButton_->setCursor(Qt::PointingHandCursor);
-    phoneMicrophoneButton_->setMinimumSize(84, 38);
-    phoneMicrophoneButton_->setEnabled(false);
-
-    phonePairButton_ = new QToolButton(root);
-    phonePairButton_->setObjectName(QStringLiteral("HeaderToolButton"));
-    phonePairButton_->setIconSize(QSize(18, 18));
-    phonePairButton_->setToolTip(QStringLiteral("与手机配对"));
-    phonePairButton_->setAccessibleName(QStringLiteral("打开手机配对二维码"));
-    phonePairButton_->setCursor(Qt::PointingHandCursor);
-    phonePairButton_->setFixedSize(42, 38);
+    phoneMicrophoneButton_->setMinimumSize(108, 38);
 
     themeButton_ = new QToolButton(root);
     themeButton_->setObjectName(QStringLiteral("ThemeButton"));
@@ -211,7 +179,6 @@ MainWindow::MainWindow(QWidget* parent)
     headerLayout->addWidget(title, 0, Qt::AlignVCenter);
     headerLayout->addStretch();
     headerLayout->addWidget(phoneMicrophoneButton_, 0, Qt::AlignVCenter);
-    headerLayout->addWidget(phonePairButton_, 0, Qt::AlignVCenter);
     headerLayout->addWidget(themeButton_, 0, Qt::AlignVCenter);
     rootLayout->addLayout(headerLayout);
 
@@ -334,7 +301,7 @@ MainWindow::MainWindow(QWidget* parent)
     bufferSpin_->setSingleStep(1);
     bufferSpin_->setValue(5);
     bufferSpin_->setSuffix(QStringLiteral(" ms"));
-    bufferSpin_->setFixedWidth(104);
+    bufferSpin_->setFixedWidth(116);
     bufferSpin_->setMinimumHeight(36);
     bufferLabelLayout->addStretch();
     bufferLabelLayout->addWidget(bufferSpin_);
@@ -457,10 +424,16 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::updateAcousticCorrection);
     connect(&engine_, &AudioEngine::programLevelChanged,
             this, &MainWindow::updateProgramLevel);
-    connect(phonePairButton_, &QToolButton::clicked,
-            this, &MainWindow::showPhonePairing);
-    connect(phoneMicrophoneButton_, &QToolButton::toggled, this,
-            [this](bool) { updatePhoneButtonAppearance(); });
+    connect(phoneMicrophoneButton_, &QToolButton::clicked, this,
+            [this](bool) {
+                if (phoneConnectionState_ == 1) {
+                    updatePhoneButtonAppearance();
+                    return;
+                }
+                const QSignalBlocker blocker(phoneMicrophoneButton_);
+                phoneMicrophoneButton_->setChecked(false);
+                showPhonePairing();
+            });
     connect(&phonePairingServer_, &PhonePairingServer::statusChanged,
             this, &MainWindow::appendStatus);
     connect(&phonePairingServer_, &PhonePairingServer::connectionChanged,
@@ -625,7 +598,7 @@ void MainWindow::rebuildOutputCards()
         delaySpin->setSingleStep(1);
         delaySpin->setValue(savedDelay);
         delaySpin->setSuffix(QStringLiteral(" ms"));
-        delaySpin->setFixedWidth(104);
+        delaySpin->setFixedWidth(116);
         delaySpin->setMinimumHeight(34);
         delaySpin->setToolTip(QStringLiteral("播放过程中可调整；较大的变化会平滑追踪，避免爆音。"));
 
@@ -1016,9 +989,16 @@ void MainWindow::updatePhoneMicrophoneLevel(double levelDbfs)
 
 void MainWindow::updatePhoneButtonAppearance()
 {
+    phoneMicrophoneButton_->setText(
+        phoneConnectionState_ == 1
+            ? QStringLiteral("已连接")
+            : phoneConnectionState_ == 2
+                ? QStringLiteral("异常")
+                : QStringLiteral("连接手机"));
     phoneMicrophoneButton_->setIcon(
-        createPhoneStatusIcon(phoneConnectionState_, darkTheme_));
-    phonePairButton_->setIcon(createQrIcon(darkTheme_));
+        createPhoneStatusIcon(phoneConnectionState_,
+                              darkTheme_,
+                              phoneMicrophoneButton_->isChecked()));
     phoneMicrophoneButton_->setProperty("connectionState", phoneConnectionState_);
 
     if (phoneConnectionState_ == 1) {
@@ -1035,14 +1015,13 @@ void MainWindow::updatePhoneButtonAppearance()
                          : QStringLiteral("当前未使用；点击启用")));
     } else if (phoneConnectionState_ == 2) {
         phoneMicrophoneButton_->setToolTip(
-            QStringLiteral("手机配对服务异常；点击右侧二维码按钮重试。"));
+            QStringLiteral("手机配对服务异常；点击重试。"));
     } else {
         phoneMicrophoneButton_->setToolTip(
-            QStringLiteral("手机未连接；点击右侧二维码按钮进行配对。"));
+            QStringLiteral("手机未连接；点击打开二维码和配对码。"));
     }
 
-    phoneMicrophoneButton_->setEnabled(phoneConnectionState_ == 1
-                                       && !engine_.isActive()
+    phoneMicrophoneButton_->setEnabled(!engine_.isActive()
                                        && !calibrator_.isActive());
     refreshDynamicStyle(phoneMicrophoneButton_);
 }
@@ -1148,9 +1127,7 @@ void MainWindow::setControlsEnabled(bool enabled)
     bufferSpin_->setEnabled(enabled || engine_.isActive());
     automaticLatencyCheck_->setEnabled(enabled);
     continuousAcousticCheck_->setEnabled(enabled);
-    phoneMicrophoneButton_->setEnabled(enabled
-                                       && phoneConnectionState_ == 1);
-    phonePairButton_->setEnabled(enabled);
+    phoneMicrophoneButton_->setEnabled(enabled);
     exclusiveModeCheck_->setEnabled(enabled);
     refreshButton_->setEnabled(enabled);
     startButton_->setEnabled(enabled || engine_.isActive());
@@ -1232,18 +1209,26 @@ QFrame#DeviceCard[selected="true"] { background: #EAF2FE; border: 1px solid #438
 QCheckBox#DeviceCheck { color: #162C54; font-size: 13px; font-weight: 500; spacing: 9px; }
 QCheckBox { color: #314668; spacing: 8px; }
 QCheckBox::indicator { width: 17px; height: 17px; }
-QComboBox, QSpinBox { color: #162C54; background: #FFFFFF; border: 1px solid #C8D9E4; border-radius: 8px; padding: 6px 10px; selection-background-color: #4382DF; }
+QComboBox, QSpinBox { color: #162C54; background: #FFFFFF; border: 1px solid #C8D9E4; border-radius: 8px; padding: 6px 34px 6px 12px; selection-background-color: #4382DF; }
 QComboBox:hover, QSpinBox:hover { border-color: #4382DF; }
 QComboBox:focus, QSpinBox:focus { border: 1px solid #4647AE; }
+QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; width: 34px; background: #EEF5FC; border: none; border-left: 1px solid #D8E5ED; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
+QComboBox::drop-down:hover { background: #DDEBFB; }
+QComboBox::down-arrow { image: url(:/controls/chevron_down_light.svg); width: 12px; height: 8px; }
 QComboBox QAbstractItemView { color: #162C54; background: #FFFFFF; border: 1px solid #AACCD6; selection-background-color: #4382DF; selection-color: #FFFFFF; outline: none; }
+QSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 30px; height: 17px; background: #EEF5FC; border: none; border-left: 1px solid #D8E5ED; border-bottom: 1px solid #D8E5ED; border-top-right-radius: 8px; }
+QSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 30px; height: 17px; background: #EEF5FC; border: none; border-left: 1px solid #D8E5ED; border-bottom-right-radius: 8px; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #DDEBFB; }
+QSpinBox::up-arrow { image: url(:/controls/chevron_up_light.svg); width: 12px; height: 8px; }
+QSpinBox::down-arrow { image: url(:/controls/chevron_down_light.svg); width: 12px; height: 8px; }
 QPushButton, QToolButton { border-radius: 8px; padding: 0 15px; font-weight: 500; }
 QPushButton#PrimaryButton { color: #FFFFFF; background: #112E81; border: 1px solid #112E81; }
 QPushButton#PrimaryButton:hover { background: #4647AE; border-color: #4647AE; }
 QPushButton#PrimaryButton:pressed { background: #0D246A; border-color: #0D246A; }
 QPushButton#PrimaryButton[running="true"] { background: #4647AE; border-color: #4647AE; }
-QPushButton#SecondaryButton, QToolButton#ThemeButton, QToolButton#HeaderToolButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; }
-QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover, QToolButton#HeaderToolButton:hover { background: #EAF2FA; border-color: #4382DF; }
-QToolButton#ThemeButton, QToolButton#HeaderToolButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QPushButton#SecondaryButton, QToolButton#ThemeButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; }
+QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover { background: #EAF2FA; border-color: #4382DF; }
+QToolButton#ThemeButton { border-radius: 10px; padding: 0; font-size: 18px; }
 QToolButton#PhoneButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; border-radius: 10px; padding: 0 10px; font-weight: 500; }
 QToolButton#PhoneButton:hover { background: #EAF2FA; border-color: #4382DF; }
 QToolButton#PhoneButton:checked { color: #FFFFFF; background: #112E81; border-color: #112E81; }
@@ -1252,9 +1237,9 @@ QToolButton#PhoneButton[connectionState="2"] { border-color: #E05252; }
 QToolButton#HelpButton { color: #4382DF; background: #F5F9FD; border: 1px solid #AACCD6; border-radius: 10px; padding: 0; font-size: 11px; font-weight: 700; }
 QToolButton#HelpButton:hover { color: #FFFFFF; background: #4382DF; border-color: #4382DF; }
 QPushButton:disabled, QToolButton:disabled { color: #8B9DB0; background: #EDF2F5; border-color: #D9E2E8; }
-QSlider::groove:horizontal { height: 5px; background: #DCE6ED; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #4382DF; border-radius: 2px; }
-QSlider::handle:horizontal { width: 15px; height: 15px; margin: -5px 0; background: #FFFFFF; border: 2px solid #4647AE; border-radius: 8px; }
+QSlider::groove:horizontal { height: 7px; background: #DCE8EF; border-radius: 4px; }
+QSlider::sub-page:horizontal { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4647AE, stop:1 #4382DF); border-radius: 4px; }
+QSlider::handle:horizontal { image: url(:/controls/slider_handle_light.svg); width: 20px; height: 20px; margin: -7px 0; background: transparent; border: none; }
 QTextEdit#LogView { color: #314668; background: #F7FAFC; border: 1px solid #D8E5ED; border-radius: 9px; padding: 7px; font-size: 11px; }
 QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #AACCD6; border-radius: 14px; }
 QLabel#PairingCode { color: #112E81; background: #EAF2FA; border-radius: 9px; padding: 8px; }
@@ -1290,18 +1275,26 @@ QFrame#DeviceCard[selected="true"] { background: #112E81; border: 1px solid #6B9
 QCheckBox#DeviceCheck { color: #EDF5F8; font-size: 13px; font-weight: 500; spacing: 9px; }
 QCheckBox { color: #C5D9E2; spacing: 8px; }
 QCheckBox::indicator { width: 17px; height: 17px; }
-QComboBox, QSpinBox { color: #EAF4F8; background: #091A38; border: 1px solid #315377; border-radius: 8px; padding: 6px 10px; selection-background-color: #4382DF; }
+QComboBox, QSpinBox { color: #EAF4F8; background: #091A38; border: 1px solid #315377; border-radius: 8px; padding: 6px 34px 6px 12px; selection-background-color: #4382DF; }
 QComboBox:hover, QSpinBox:hover { border-color: #5D95E6; }
 QComboBox:focus, QSpinBox:focus { border: 1px solid #4382DF; }
+QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; width: 34px; background: #10284E; border: none; border-left: 1px solid #234A73; border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
+QComboBox::drop-down:hover { background: #173662; }
+QComboBox::down-arrow { image: url(:/controls/chevron_down_dark.svg); width: 12px; height: 8px; }
 QComboBox QAbstractItemView { color: #EAF4F8; background: #0D2247; border: 1px solid #315377; selection-background-color: #4382DF; selection-color: #FFFFFF; outline: none; }
+QSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 30px; height: 17px; background: #10284E; border: none; border-left: 1px solid #234A73; border-bottom: 1px solid #234A73; border-top-right-radius: 8px; }
+QSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 30px; height: 17px; background: #10284E; border: none; border-left: 1px solid #234A73; border-bottom-right-radius: 8px; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #173662; }
+QSpinBox::up-arrow { image: url(:/controls/chevron_up_dark.svg); width: 12px; height: 8px; }
+QSpinBox::down-arrow { image: url(:/controls/chevron_down_dark.svg); width: 12px; height: 8px; }
 QPushButton, QToolButton { border-radius: 8px; padding: 0 15px; font-weight: 500; }
 QPushButton#PrimaryButton { color: #FFFFFF; background: #4382DF; border: 1px solid #4382DF; }
 QPushButton#PrimaryButton:hover { background: #5B93E5; border-color: #5B93E5; }
 QPushButton#PrimaryButton:pressed { background: #4647AE; border-color: #4647AE; }
 QPushButton#PrimaryButton[running="true"] { background: #4647AE; border-color: #6C6DD0; }
-QPushButton#SecondaryButton, QToolButton#ThemeButton, QToolButton#HeaderToolButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; }
-QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover, QToolButton#HeaderToolButton:hover { background: #173662; border-color: #4382DF; }
-QToolButton#ThemeButton, QToolButton#HeaderToolButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QPushButton#SecondaryButton, QToolButton#ThemeButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; }
+QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover { background: #173662; border-color: #4382DF; }
+QToolButton#ThemeButton { border-radius: 10px; padding: 0; font-size: 18px; }
 QToolButton#PhoneButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; border-radius: 10px; padding: 0 10px; font-weight: 500; }
 QToolButton#PhoneButton:hover { background: #173662; border-color: #4382DF; }
 QToolButton#PhoneButton:checked { color: #FFFFFF; background: #4647AE; border-color: #7778DE; }
@@ -1310,9 +1303,9 @@ QToolButton#PhoneButton[connectionState="2"] { border-color: #E05252; }
 QToolButton#HelpButton { color: #AACCD6; background: #10284E; border: 1px solid #315377; border-radius: 10px; padding: 0; font-size: 11px; font-weight: 700; }
 QToolButton#HelpButton:hover { color: #FFFFFF; background: #4382DF; border-color: #4382DF; }
 QPushButton:disabled, QToolButton:disabled { color: #6E86A4; background: #0E203B; border-color: #1E3651; }
-QSlider::groove:horizontal { height: 5px; background: #27415F; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #4382DF; border-radius: 2px; }
-QSlider::handle:horizontal { width: 15px; height: 15px; margin: -5px 0; background: #EAF4F8; border: 2px solid #77A9EE; border-radius: 8px; }
+QSlider::groove:horizontal { height: 7px; background: #27415F; border-radius: 4px; }
+QSlider::sub-page:horizontal { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4647AE, stop:1 #4382DF); border-radius: 4px; }
+QSlider::handle:horizontal { image: url(:/controls/slider_handle_dark.svg); width: 20px; height: 20px; margin: -7px 0; background: transparent; border: none; }
 QTextEdit#LogView { color: #C7DAE4; background: #091A38; border: 1px solid #1E3D64; border-radius: 9px; padding: 7px; font-size: 11px; }
 QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #315377; border-radius: 14px; }
 QLabel#PairingCode { color: #DCEAF2; background: #102A50; border-radius: 9px; padding: 8px; }

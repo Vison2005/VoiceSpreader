@@ -7,4 +7,12 @@
         <file alias="HarmonyOS_Sans_SC_Medium.ttf">assets/fonts/HarmonyOS_Sans_SC_Medium.ttf</file>
         <file alias="HarmonyOS_Sans_SC_Bold.ttf">assets/fonts/HarmonyOS_Sans_SC_Bold.ttf</file>
     </qresource>
+    <qresource prefix="/controls">
+        <file alias="chevron_down_light.svg">assets/controls/chevron_down_light.svg</file>
+        <file alias="chevron_up_light.svg">assets/controls/chevron_up_light.svg</file>
+        <file alias="chevron_down_dark.svg">assets/controls/chevron_down_dark.svg</file>
+        <file alias="chevron_up_dark.svg">assets/controls/chevron_up_dark.svg</file>
+        <file alias="slider_handle_light.svg">assets/controls/slider_handle_light.svg</file>
+        <file alias="slider_handle_dark.svg">assets/controls/slider_handle_dark.svg</file>
+    </qresource>
 </RCC>

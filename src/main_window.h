@@ -81,7 +81,6 @@ private:
     QPushButton* startButton_ = nullptr;
     QToolButton* themeButton_ = nullptr;
     QToolButton* phoneMicrophoneButton_ = nullptr;
-    QToolButton* phonePairButton_ = nullptr;
     QTextEdit* logView_ = nullptr;
     QLabel* calibrationHintLabel_ = nullptr;
     QLabel* programLevelLabel_ = nullptr;
