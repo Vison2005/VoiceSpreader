@@ -161,6 +161,17 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    server.disconnectPhone();
+    if (!waitFor(
+            [&] {
+                return client.state() == QAbstractSocket::UnconnectedState
+                       && !server.phoneConnected();
+            },
+            1500)) {
+        std::cerr << "Desktop initiated disconnect timed out\n";
+        return 1;
+    }
+
     std::cout << "Phone pairing and PCM protocol test passed\n";
     return 0;
 }

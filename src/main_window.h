@@ -10,6 +10,8 @@
 #include <QSet>
 #include <QVector>
 
+class LevelMeterWidget;
+class QBoxLayout;
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -19,6 +21,8 @@ class QSpinBox;
 class QTextEdit;
 class QToolButton;
 class QVBoxLayout;
+class QResizeEvent;
+class QWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -27,6 +31,9 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
 
 private slots:
     void refreshDevices();
@@ -59,6 +66,7 @@ private:
     void setControlsEnabled(bool enabled);
     void applyTheme();
     void updatePhoneButtonAppearance();
+    void updateResponsiveLayout();
 
     AudioEngine engine_;
     LatencyCalibrator calibrator_;
@@ -76,14 +84,20 @@ private:
     QCheckBox* exclusiveModeCheck_ = nullptr;
     QLabel* selectionLabel_ = nullptr;
     QLabel* stateLabel_ = nullptr;
+    QLabel* titleLabel_ = nullptr;
     QPushButton* refreshButton_ = nullptr;
     QPushButton* calibrateButton_ = nullptr;
     QPushButton* startButton_ = nullptr;
     QToolButton* themeButton_ = nullptr;
     QToolButton* phoneMicrophoneButton_ = nullptr;
+    LevelMeterWidget* phoneLevelMeter_ = nullptr;
     QTextEdit* logView_ = nullptr;
     QLabel* calibrationHintLabel_ = nullptr;
     QLabel* programLevelLabel_ = nullptr;
+    QBoxLayout* contentLayout_ = nullptr;
+    QBoxLayout* sourceControlsLayout_ = nullptr;
+    QBoxLayout* calibrationControlsLayout_ = nullptr;
+    QWidget* rightColumn_ = nullptr;
 
     QHash<QString, QCheckBox*> outputChecks_;
     QHash<QString, QSlider*> volumeSliders_;
@@ -95,4 +109,5 @@ private:
     double phoneMicrophoneLevelDbfs_ = -160.0;
     int phoneConnectionState_ = 0;
     bool darkTheme_ = false;
+    bool compactLayout_ = false;
 };

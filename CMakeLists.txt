@@ -39,8 +39,11 @@ set(VOICESPREADER_SOURCES
     src/audio_engine.h
     src/main_window.cpp
     src/main_window.h
+    src/level_meter_widget.cpp
+    src/level_meter_widget.h
     resources.qrc
     assets/VoiceSpreader.rc
+    assets/VoiceSpreader.manifest
 )
 
 add_executable(VoiceSpreader WIN32 ${VOICESPREADER_SOURCES})

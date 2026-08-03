@@ -51,26 +51,71 @@ int main(int argc, char* argv[])
 
     const QString fontFamily = loadApplicationFonts();
     if (!fontFamily.isEmpty()) {
-        QFont applicationFont(fontFamily, 10);
-        applicationFont.setHintingPreference(QFont::PreferVerticalHinting);
-        applicationFont.setStyleStrategy(QFont::PreferQuality);
+        QFont applicationFont(fontFamily);
+        applicationFont.setPointSizeF(10.0);
+        applicationFont.setHintingPreference(QFont::PreferFullHinting);
+        applicationFont.setStyleStrategy(
+            static_cast<QFont::StyleStrategy>(QFont::PreferQuality
+                                              | QFont::PreferAntialias));
         application.setFont(applicationFont);
     }
     application.setWindowIcon(QIcon(QStringLiteral(":/assets/app.png")));
 
-    MainWindow window;
-    window.show();
-
     QString previewPath;
     bool previewDark = false;
+    bool previewPhoneConnected = false;
+    double previewPhoneLevel = -160.0;
+    QSize requestedWindowSize;
     for (const QString& argument : application.arguments()) {
         if (argument.startsWith(QStringLiteral("--render-preview="))) {
             previewPath = argument.mid(QStringLiteral("--render-preview=").size());
         } else if (argument.startsWith(QStringLiteral("--render-preview-dark="))) {
             previewDark = true;
             previewPath = argument.mid(QStringLiteral("--render-preview-dark=").size());
+        } else if (argument.startsWith(QStringLiteral("--window-size="))) {
+            const QStringList parts = argument
+                                          .mid(QStringLiteral("--window-size=").size())
+                                          .split(QLatin1Char('x'));
+            bool widthValid = false;
+            bool heightValid = false;
+            const int width = parts.value(0).toInt(&widthValid);
+            const int height = parts.value(1).toInt(&heightValid);
+            if (parts.size() == 2 && widthValid && heightValid
+                && width > 0 && height > 0) {
+                requestedWindowSize = QSize(width, height);
+            }
+        } else if (argument.startsWith(QStringLiteral("--preview-phone-level="))) {
+            bool valid = false;
+            const double level = argument
+                                     .mid(QStringLiteral("--preview-phone-level=").size())
+                                     .toDouble(&valid);
+            if (valid) {
+                previewPhoneConnected = true;
+                previewPhoneLevel = level;
+            }
         }
     }
+
+    MainWindow window;
+    if (requestedWindowSize.isValid()) {
+        window.resize(requestedWindowSize);
+    }
+    window.show();
+
+    if (previewPhoneConnected) {
+        QMetaObject::invokeMethod(
+            &window,
+            "updatePhoneConnection",
+            Qt::DirectConnection,
+            Q_ARG(bool, true),
+            Q_ARG(QString, QStringLiteral("预览手机")));
+        QMetaObject::invokeMethod(
+            &window,
+            "updatePhoneMicrophoneLevel",
+            Qt::DirectConnection,
+            Q_ARG(double, previewPhoneLevel));
+    }
+
     if (!previewPath.isEmpty()) {
         if (previewDark) {
             QMetaObject::invokeMethod(&window, "toggleTheme", Qt::DirectConnection);

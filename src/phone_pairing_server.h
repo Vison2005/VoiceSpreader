@@ -24,6 +24,7 @@ public:
 
     bool start(QString* errorMessage = nullptr);
     void stop();
+    void disconnectPhone();
     void resetPairing();
 
     QString pairingCode() const;

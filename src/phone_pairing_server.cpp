@@ -93,6 +93,15 @@ void PhonePairingServer::stop()
     discoverySocket_->close();
 }
 
+void PhonePairingServer::disconnectPhone()
+{
+    if (client_ == nullptr || !authenticated_) {
+        return;
+    }
+    emit statusChanged(QStringLiteral("正在主动断开手机：%1").arg(phoneName_));
+    client_->disconnectFromHost();
+}
+
 void PhonePairingServer::resetPairing()
 {
     if (client_ != nullptr) {

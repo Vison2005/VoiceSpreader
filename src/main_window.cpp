@@ -1,9 +1,11 @@
 #include "main_window.h"
 
+#include "level_meter_widget.h"
 #include "pairing_qr_code.h"
 #include "wasapi_device_manager.h"
 
 #include <QApplication>
+#include <QBoxLayout>
 #include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
@@ -13,6 +15,7 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPainter>
@@ -20,16 +23,20 @@
 #include <QPen>
 #include <QPushButton>
 #include <QPixmap>
+#include <QResizeEvent>
 #include <QScrollArea>
+#include <QScreen>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
 #include <QTextEdit>
 #include <QToolButton>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -137,8 +144,16 @@ MainWindow::MainWindow(QWidget* parent)
 {
     setWindowTitle(QStringLiteral("VoiceSpreader"));
     setWindowIcon(QIcon(QStringLiteral(":/assets/app.png")));
-    setMinimumSize(980, 680);
-    resize(1120, 760);
+    setMinimumSize(600, 360);
+    QSize initialSize(1120, 760);
+    if (QScreen* screen = QGuiApplication::primaryScreen()) {
+        const QSize available = screen->availableGeometry().size();
+        initialSize.setWidth(std::max(minimumWidth(),
+                                      std::min(initialSize.width(), available.width() - 24)));
+        initialSize.setHeight(std::max(minimumHeight(),
+                                       std::min(initialSize.height(), available.height() - 24)));
+    }
+    resize(initialSize);
 
     auto* root = new QWidget(this);
     root->setObjectName(QStringLiteral("Root"));
@@ -157,8 +172,10 @@ MainWindow::MainWindow(QWidget* parent)
         QPixmap(QStringLiteral(":/assets/app.png")).scaled(
             44, 44, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 
-    auto* title = new QLabel(QStringLiteral("VoiceSpreader"), root);
-    title->setObjectName(QStringLiteral("AppTitle"));
+    titleLabel_ = new QLabel(QStringLiteral("VoiceSpreader"), root);
+    titleLabel_->setObjectName(QStringLiteral("AppTitle"));
+
+    phoneLevelMeter_ = new LevelMeterWidget(root);
 
     phoneMicrophoneButton_ = new QToolButton(root);
     phoneMicrophoneButton_->setObjectName(QStringLiteral("PhoneButton"));
@@ -168,6 +185,7 @@ MainWindow::MainWindow(QWidget* parent)
     phoneMicrophoneButton_->setCheckable(true);
     phoneMicrophoneButton_->setCursor(Qt::PointingHandCursor);
     phoneMicrophoneButton_->setMinimumSize(108, 38);
+    phoneMicrophoneButton_->setContextMenuPolicy(Qt::CustomContextMenu);
 
     themeButton_ = new QToolButton(root);
     themeButton_->setObjectName(QStringLiteral("ThemeButton"));
@@ -176,16 +194,25 @@ MainWindow::MainWindow(QWidget* parent)
     themeButton_->setFixedSize(42, 38);
 
     headerLayout->addWidget(brandIcon, 0, Qt::AlignVCenter);
-    headerLayout->addWidget(title, 0, Qt::AlignVCenter);
+    headerLayout->addWidget(titleLabel_, 0, Qt::AlignVCenter);
     headerLayout->addStretch();
+    headerLayout->addWidget(phoneLevelMeter_, 0, Qt::AlignVCenter);
     headerLayout->addWidget(phoneMicrophoneButton_, 0, Qt::AlignVCenter);
     headerLayout->addWidget(themeButton_, 0, Qt::AlignVCenter);
     rootLayout->addLayout(headerLayout);
 
-    auto* contentLayout = new QHBoxLayout();
-    contentLayout->setSpacing(16);
+    auto* contentScroll = new QScrollArea(root);
+    contentScroll->setObjectName(QStringLiteral("ContentScroll"));
+    contentScroll->setWidgetResizable(true);
+    contentScroll->setFrameShape(QFrame::NoFrame);
+    contentScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* contentContainer = new QWidget(contentScroll);
+    contentContainer->setObjectName(QStringLiteral("Transparent"));
+    contentLayout_ = new QBoxLayout(QBoxLayout::LeftToRight, contentContainer);
+    contentLayout_->setContentsMargins(0, 0, 0, 0);
+    contentLayout_->setSpacing(16);
 
-    auto* leftColumn = new QWidget(root);
+    auto* leftColumn = new QWidget(contentContainer);
     leftColumn->setObjectName(QStringLiteral("Transparent"));
     auto* leftLayout = new QVBoxLayout(leftColumn);
     leftLayout->setContentsMargins(0, 0, 0, 0);
@@ -205,17 +232,17 @@ MainWindow::MainWindow(QWidget* parent)
     sourceHeader->addStretch();
     sourceLayout->addLayout(sourceHeader);
 
-    auto* sourceControls = new QHBoxLayout();
-    sourceControls->setSpacing(8);
+    sourceControlsLayout_ = new QBoxLayout(QBoxLayout::LeftToRight);
+    sourceControlsLayout_->setSpacing(8);
     captureCombo_ = new QComboBox(sourceCard);
     captureCombo_->setMinimumHeight(38);
     refreshButton_ = new QPushButton(QStringLiteral("刷新设备"), sourceCard);
     refreshButton_->setObjectName(QStringLiteral("SecondaryButton"));
     refreshButton_->setCursor(Qt::PointingHandCursor);
     refreshButton_->setMinimumHeight(38);
-    sourceControls->addWidget(captureCombo_, 1);
-    sourceControls->addWidget(refreshButton_);
-    sourceLayout->addLayout(sourceControls);
+    sourceControlsLayout_->addWidget(captureCombo_, 1);
+    sourceControlsLayout_->addWidget(refreshButton_);
+    sourceLayout->addLayout(sourceControlsLayout_);
 
     auto* calibrationHeader = new QHBoxLayout();
     auto* calibrationTitle = new QLabel(QStringLiteral("校准麦克风"), sourceCard);
@@ -227,17 +254,17 @@ MainWindow::MainWindow(QWidget* parent)
     calibrationHeader->addStretch();
     sourceLayout->addLayout(calibrationHeader);
 
-    auto* calibrationControls = new QHBoxLayout();
-    calibrationControls->setSpacing(8);
+    calibrationControlsLayout_ = new QBoxLayout(QBoxLayout::LeftToRight);
+    calibrationControlsLayout_->setSpacing(8);
     microphoneCombo_ = new QComboBox(sourceCard);
     microphoneCombo_->setMinimumHeight(38);
     calibrateButton_ = new QPushButton(QStringLiteral("自动校准"), sourceCard);
     calibrateButton_->setObjectName(QStringLiteral("SecondaryButton"));
     calibrateButton_->setCursor(Qt::PointingHandCursor);
     calibrateButton_->setMinimumHeight(38);
-    calibrationControls->addWidget(microphoneCombo_, 1);
-    calibrationControls->addWidget(calibrateButton_);
-    sourceLayout->addLayout(calibrationControls);
+    calibrationControlsLayout_->addWidget(microphoneCombo_, 1);
+    calibrationControlsLayout_->addWidget(calibrateButton_);
+    sourceLayout->addLayout(calibrationControlsLayout_);
 
     calibrationHintLabel_ = new QLabel(sourceCard);
     calibrationHintLabel_->setObjectName(QStringLiteral("CalibrationStatus"));
@@ -248,6 +275,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* outputCard = new QFrame(leftColumn);
     outputCard->setObjectName(QStringLiteral("Card"));
+    outputCard->setMinimumHeight(280);
     auto* outputLayout = new QVBoxLayout(outputCard);
     outputLayout->setContentsMargins(18, 16, 18, 16);
     outputLayout->setSpacing(12);
@@ -274,15 +302,15 @@ MainWindow::MainWindow(QWidget* parent)
     outputLayout->addWidget(outputScroll, 1);
     leftLayout->addWidget(outputCard, 1);
 
-    auto* rightColumn = new QWidget(root);
-    rightColumn->setObjectName(QStringLiteral("Transparent"));
-    rightColumn->setMinimumWidth(330);
-    rightColumn->setMaximumWidth(390);
-    auto* rightLayout = new QVBoxLayout(rightColumn);
+    rightColumn_ = new QWidget(contentContainer);
+    rightColumn_->setObjectName(QStringLiteral("Transparent"));
+    rightColumn_->setMinimumWidth(330);
+    rightColumn_->setMaximumWidth(390);
+    auto* rightLayout = new QVBoxLayout(rightColumn_);
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(14);
 
-    auto* syncCard = new QFrame(rightColumn);
+    auto* syncCard = new QFrame(rightColumn_);
     syncCard->setObjectName(QStringLiteral("Card"));
     auto* syncLayout = new QVBoxLayout(syncCard);
     syncLayout->setContentsMargins(18, 16, 18, 16);
@@ -358,8 +386,9 @@ MainWindow::MainWindow(QWidget* parent)
     syncLayout->addWidget(programLevelLabel_);
     rightLayout->addWidget(syncCard);
 
-    auto* logCard = new QFrame(rightColumn);
+    auto* logCard = new QFrame(rightColumn_);
     logCard->setObjectName(QStringLiteral("Card"));
+    logCard->setMinimumHeight(190);
     auto* logLayout = new QVBoxLayout(logCard);
     logLayout->setContentsMargins(18, 16, 18, 16);
     logLayout->setSpacing(10);
@@ -370,9 +399,10 @@ MainWindow::MainWindow(QWidget* parent)
     logLayout->addWidget(logView_, 1);
     rightLayout->addWidget(logCard, 1);
 
-    contentLayout->addWidget(leftColumn, 1);
-    contentLayout->addWidget(rightColumn);
-    rootLayout->addLayout(contentLayout, 1);
+    contentLayout_->addWidget(leftColumn, 1);
+    contentLayout_->addWidget(rightColumn_);
+    contentScroll->setWidget(contentContainer);
+    rootLayout->addWidget(contentScroll, 1);
 
     auto* actionBar = new QFrame(root);
     actionBar->setObjectName(QStringLiteral("ActionBar"));
@@ -425,7 +455,19 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&engine_, &AudioEngine::programLevelChanged,
             this, &MainWindow::updateProgramLevel);
     connect(phoneMicrophoneButton_, &QToolButton::clicked, this,
-            [this](bool) {
+            [this](bool checked) {
+                if (engine_.isActive() || calibrator_.isActive()) {
+                    const QSignalBlocker blocker(phoneMicrophoneButton_);
+                    phoneMicrophoneButton_->setChecked(!checked);
+                    QToolTip::showText(
+                        phoneMicrophoneButton_->mapToGlobal(
+                            QPoint(phoneMicrophoneButton_->width() / 2,
+                                   phoneMicrophoneButton_->height())),
+                        QStringLiteral("请先停止同步或校准，再切换手机麦克风。"),
+                        phoneMicrophoneButton_);
+                    updatePhoneButtonAppearance();
+                    return;
+                }
                 if (phoneConnectionState_ == 1) {
                     updatePhoneButtonAppearance();
                     return;
@@ -433,6 +475,18 @@ MainWindow::MainWindow(QWidget* parent)
                 const QSignalBlocker blocker(phoneMicrophoneButton_);
                 phoneMicrophoneButton_->setChecked(false);
                 showPhonePairing();
+            });
+    connect(phoneMicrophoneButton_, &QToolButton::customContextMenuRequested,
+            this, [this](const QPoint& position) {
+                QMenu menu(this);
+                QAction* disconnectAction = menu.addAction(
+                    createPhoneStatusIcon(2, darkTheme_, false),
+                    QStringLiteral("断开手机连接"));
+                disconnectAction->setEnabled(phoneConnectionState_ == 1);
+                if (menu.exec(phoneMicrophoneButton_->mapToGlobal(position))
+                    == disconnectAction) {
+                    phonePairingServer_.disconnectPhone();
+                }
             });
     connect(&phonePairingServer_, &PhonePairingServer::statusChanged,
             this, &MainWindow::appendStatus);
@@ -459,6 +513,7 @@ MainWindow::MainWindow(QWidget* parent)
         appendStatus(QStringLiteral("手机配对服务启动失败：%1").arg(pairingError));
     }
     updatePhoneButtonAppearance();
+    updateResponsiveLayout();
 }
 
 MainWindow::~MainWindow()
@@ -466,6 +521,53 @@ MainWindow::~MainWindow()
     calibrator_.stop();
     engine_.stop();
     phonePairingServer_.stop();
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event)
+{
+    QMainWindow::resizeEvent(event);
+    updateResponsiveLayout();
+}
+
+void MainWindow::updateResponsiveLayout()
+{
+    if (contentLayout_ == nullptr || rightColumn_ == nullptr
+        || sourceControlsLayout_ == nullptr
+        || calibrationControlsLayout_ == nullptr) {
+        return;
+    }
+
+    const bool compact = width() < 940;
+    const bool narrow = width() < 720;
+    titleLabel_->setVisible(!narrow);
+    sourceControlsLayout_->setDirection(narrow ? QBoxLayout::TopToBottom
+                                               : QBoxLayout::LeftToRight);
+    calibrationControlsLayout_->setDirection(narrow ? QBoxLayout::TopToBottom
+                                                    : QBoxLayout::LeftToRight);
+    refreshButton_->setSizePolicy(
+        narrow ? QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed)
+               : QSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed));
+    calibrateButton_->setSizePolicy(
+        narrow ? QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed)
+               : QSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed));
+    if (compactLayout_ == compact
+        && contentLayout_->direction()
+               == (compact ? QBoxLayout::TopToBottom
+                           : QBoxLayout::LeftToRight)) {
+        return;
+    }
+
+    compactLayout_ = compact;
+    contentLayout_->setDirection(compact ? QBoxLayout::TopToBottom
+                                         : QBoxLayout::LeftToRight);
+    contentLayout_->setStretch(0, compact ? 0 : 1);
+    contentLayout_->setStretch(1, 0);
+    rightColumn_->setMinimumWidth(compact ? 0 : 330);
+    rightColumn_->setMaximumWidth(compact ? QWIDGETSIZE_MAX : 390);
+    rightColumn_->setSizePolicy(
+        compact ? QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred)
+                : QSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding));
+    contentLayout_->invalidate();
 }
 
 void MainWindow::refreshDevices()
@@ -978,12 +1080,15 @@ void MainWindow::updatePhoneConnection(bool connected, const QString& phoneName)
         phoneMicrophoneLevelDbfs_ = -160.0;
         phoneMicrophoneButton_->setChecked(false);
     }
+    phoneLevelMeter_->setConnected(connected);
+    phoneLevelMeter_->setLevelDbfs(phoneMicrophoneLevelDbfs_);
     updatePhoneButtonAppearance();
 }
 
 void MainWindow::updatePhoneMicrophoneLevel(double levelDbfs)
 {
     phoneMicrophoneLevelDbfs_ = levelDbfs;
+    phoneLevelMeter_->setLevelDbfs(levelDbfs);
     updatePhoneButtonAppearance();
 }
 
@@ -1021,8 +1126,8 @@ void MainWindow::updatePhoneButtonAppearance()
             QStringLiteral("手机未连接；点击打开二维码和配对码。"));
     }
 
-    phoneMicrophoneButton_->setEnabled(!engine_.isActive()
-                                       && !calibrator_.isActive());
+    // 保持按钮可用，确保同步过程中仍能通过右键主动断开手机。
+    phoneMicrophoneButton_->setEnabled(true);
     refreshDynamicStyle(phoneMicrophoneButton_);
 }
 
@@ -1127,7 +1232,8 @@ void MainWindow::setControlsEnabled(bool enabled)
     bufferSpin_->setEnabled(enabled || engine_.isActive());
     automaticLatencyCheck_->setEnabled(enabled);
     continuousAcousticCheck_->setEnabled(enabled);
-    phoneMicrophoneButton_->setEnabled(enabled);
+    // 左键切换会在运行中被拦截，但右键断开必须始终可用。
+    phoneMicrophoneButton_->setEnabled(true);
     exclusiveModeCheck_->setEnabled(enabled);
     refreshButton_->setEnabled(enabled);
     startButton_->setEnabled(enabled || engine_.isActive());
@@ -1151,6 +1257,7 @@ void MainWindow::applyTheme()
     themeButton_->setIcon(createThemeIcon(darkTheme_));
     themeButton_->setToolTip(darkTheme_ ? QStringLiteral("切换到浅色模式")
                                         : QStringLiteral("切换到深色模式"));
+    phoneLevelMeter_->setDarkTheme(darkTheme_);
 
     QPalette palette;
     if (darkTheme_) {
@@ -1243,8 +1350,8 @@ QSlider::handle:horizontal { image: url(:/controls/slider_handle_light.svg); wid
 QTextEdit#LogView { color: #314668; background: #F7FAFC; border: 1px solid #D8E5ED; border-radius: 9px; padding: 7px; font-size: 11px; }
 QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #AACCD6; border-radius: 14px; }
 QLabel#PairingCode { color: #112E81; background: #EAF2FA; border-radius: 9px; padding: 8px; }
-QScrollArea#OutputScroll { background: transparent; border: none; }
-QScrollArea#OutputScroll > QWidget > QWidget { background: transparent; }
+QScrollArea#OutputScroll, QScrollArea#ContentScroll { background: transparent; border: none; }
+QScrollArea#OutputScroll > QWidget > QWidget, QScrollArea#ContentScroll > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { width: 8px; background: transparent; margin: 2px; }
 QScrollBar::handle:vertical { min-height: 28px; background: #AACCD6; border-radius: 4px; }
 QScrollBar::handle:vertical:hover { background: #7FA8C4; }
@@ -1309,8 +1416,8 @@ QSlider::handle:horizontal { image: url(:/controls/slider_handle_dark.svg); widt
 QTextEdit#LogView { color: #C7DAE4; background: #091A38; border: 1px solid #1E3D64; border-radius: 9px; padding: 7px; font-size: 11px; }
 QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #315377; border-radius: 14px; }
 QLabel#PairingCode { color: #DCEAF2; background: #102A50; border-radius: 9px; padding: 8px; }
-QScrollArea#OutputScroll { background: transparent; border: none; }
-QScrollArea#OutputScroll > QWidget > QWidget { background: transparent; }
+QScrollArea#OutputScroll, QScrollArea#ContentScroll { background: transparent; border: none; }
+QScrollArea#OutputScroll > QWidget > QWidget, QScrollArea#ContentScroll > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { width: 8px; background: transparent; margin: 2px; }
 QScrollBar::handle:vertical { min-height: 28px; background: #315377; border-radius: 4px; }
 QScrollBar::handle:vertical:hover { background: #4382DF; }
