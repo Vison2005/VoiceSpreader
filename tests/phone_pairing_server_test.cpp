@@ -54,7 +54,8 @@ QByteArray makePcmPacket(std::uint64_t firstFrame,
 int main(int argc, char* argv[])
 {
     QCoreApplication application(argc, argv);
-    PhonePairingServer server;
+    // 使用临时发现端口，避免正在运行的正式程序占用 39741 干扰测试。
+    PhonePairingServer server(nullptr, 0);
     QString error;
     if (!server.start(&error)) {
         std::cerr << "Pairing server failed: " << error.toStdString() << '\n';
@@ -68,7 +69,9 @@ int main(int argc, char* argv[])
     }
     const QByteArray request = QByteArrayLiteral("VSP_DISCOVER ")
                                + server.pairingCode().toLatin1();
-    discovery.writeDatagram(request, QHostAddress::LocalHost, 39741);
+    discovery.writeDatagram(request,
+                            QHostAddress::LocalHost,
+                            server.discoveryPort());
     if (!waitFor([&] { return discovery.hasPendingDatagrams(); }, 1500)) {
         std::cerr << "Pairing-code discovery timed out\n";
         return 1;
@@ -80,6 +83,28 @@ int main(int argc, char* argv[])
     if (discoveryObject.value(QStringLiteral("session")).toString().isEmpty()
         || discoveryObject.value(QStringLiteral("secret")).toString().isEmpty()) {
         std::cerr << "Pairing-code discovery response is invalid\n";
+        return 1;
+    }
+
+    const QByteArray locateRequest = QByteArrayLiteral("VSP_LOCATE ")
+                                     + discoveryObject
+                                           .value(QStringLiteral("session"))
+                                           .toString()
+                                           .toLatin1();
+    discovery.writeDatagram(locateRequest,
+                            QHostAddress::LocalHost,
+                            server.discoveryPort());
+    if (!waitFor([&] { return discovery.hasPendingDatagrams(); }, 1500)) {
+        std::cerr << "QR session location timed out\n";
+        return 1;
+    }
+    const QJsonObject locationObject = QJsonDocument::fromJson(
+                                            discovery.receiveDatagram().data())
+                                            .object();
+    if (locationObject.value(QStringLiteral("session"))
+            != discoveryObject.value(QStringLiteral("session"))
+        || locationObject.contains(QStringLiteral("secret"))) {
+        std::cerr << "QR session location response is invalid\n";
         return 1;
     }
 

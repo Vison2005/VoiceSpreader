@@ -19,7 +19,6 @@
 
 namespace
 {
-constexpr quint16 discoveryPort = 39741;
 constexpr quint32 maximumFrameBytes = 256 * 1024;
 
 QString randomHex(int bytes)
@@ -34,10 +33,11 @@ QString randomHex(int bytes)
 }
 }
 
-PhonePairingServer::PhonePairingServer(QObject* parent)
+PhonePairingServer::PhonePairingServer(QObject* parent, quint16 discoveryPort)
     : QObject(parent)
     , tcpServer_(new QTcpServer(this))
     , discoverySocket_(new QUdpSocket(this))
+    , discoveryPort_(discoveryPort)
     , remoteBuffer_(std::make_shared<RemoteMicrophoneBuffer>())
 {
     connect(tcpServer_, &QTcpServer::newConnection,
@@ -64,7 +64,7 @@ bool PhonePairingServer::start(QString* errorMessage)
     if (discoverySocket_->state() == QAbstractSocket::UnconnectedState) {
         const bool discoveryReady = discoverySocket_->bind(
             QHostAddress::AnyIPv4,
-            discoveryPort,
+            discoveryPort_,
             QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint);
         if (!discoveryReady) {
             emit statusChanged(QStringLiteral("手机配对码发现不可用：%1；二维码仍可使用")
@@ -121,9 +121,102 @@ QString PhonePairingServer::localAddress() const
     return localAddress_;
 }
 
+QStringList PhonePairingServer::localIpv4Addresses() const
+{
+    struct Candidate
+    {
+        QString address;
+        int score = 0;
+    };
+    std::vector<Candidate> candidates;
+    for (const QNetworkInterface& interface : QNetworkInterface::allInterfaces()) {
+        const auto flags = interface.flags();
+        if (!flags.testFlag(QNetworkInterface::IsUp)
+            || !flags.testFlag(QNetworkInterface::IsRunning)
+            || flags.testFlag(QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+        for (const QNetworkAddressEntry& entry : interface.addressEntries()) {
+            if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol) {
+                continue;
+            }
+            const QString address = entry.ip().toString();
+            if (address.startsWith(QStringLiteral("169.254."))) {
+                continue;
+            }
+            int score = 1;
+            if (address.startsWith(QStringLiteral("192.168."))) {
+                score += 30;
+            } else if (address.startsWith(QStringLiteral("10."))) {
+                score += 20;
+            } else if (entry.ip().isInSubnet(QHostAddress(QStringLiteral("172.16.0.0")),
+                                             12)) {
+                score += 10;
+            }
+            // 同时连接有线和无线时，优先采用路由指标通常更低的实体有线网卡。
+            if (interface.type() == QNetworkInterface::Ethernet) {
+                score += 60;
+            } else if (interface.type() == QNetworkInterface::Wifi) {
+                score += 50;
+            } else if (interface.type() == QNetworkInterface::Virtual) {
+                score -= 100;
+            }
+            const QString adapterText = (interface.name()
+                                         + QLatin1Char(' ')
+                                         + interface.humanReadableName())
+                                            .toLower();
+            const QStringList virtualMarkers{
+                QStringLiteral("vmware"),
+                QStringLiteral("virtual"),
+                QStringLiteral("radmin"),
+                QStringLiteral("zerotier"),
+                QStringLiteral("vpn"),
+                QStringLiteral("hyper-v"),
+                QStringLiteral("vethernet"),
+                QStringLiteral("wsl")};
+            for (const QString& marker : virtualMarkers) {
+                if (adapterText.contains(marker)) {
+                    score -= 200;
+                    break;
+                }
+            }
+            candidates.push_back({address, score});
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& left,
+                                                        const Candidate& right) {
+        if (left.score != right.score) {
+            return left.score > right.score;
+        }
+        return left.address < right.address;
+    });
+    QStringList result;
+    for (const Candidate& candidate : candidates) {
+        if (!result.contains(candidate.address)) {
+            result.push_back(candidate.address);
+        }
+    }
+    return result;
+}
+
+bool PhonePairingServer::setLocalAddress(const QString& address)
+{
+    if (!localIpv4Addresses().contains(address)) {
+        return false;
+    }
+    localAddress_ = address;
+    emit statusChanged(QStringLiteral("手机配对二维码已切换到电脑地址 %1").arg(address));
+    return true;
+}
+
 quint16 PhonePairingServer::serverPort() const
 {
     return tcpServer_->serverPort();
+}
+
+quint16 PhonePairingServer::discoveryPort() const
+{
+    return discoverySocket_->localPort();
 }
 
 bool PhonePairingServer::phoneConnected() const
@@ -204,9 +297,14 @@ void PhonePairingServer::readDiscoveryDatagrams()
 {
     while (discoverySocket_->hasPendingDatagrams()) {
         const QNetworkDatagram datagram = discoverySocket_->receiveDatagram();
-        const QByteArray expected = QByteArrayLiteral("VSP_DISCOVER ")
-                                    + pairingCode_.toLatin1();
-        if (datagram.data().trimmed() != expected) {
+        const QByteArray request = datagram.data().trimmed();
+        const QByteArray expectedCode = QByteArrayLiteral("VSP_DISCOVER ")
+                                        + pairingCode_.toLatin1();
+        const QByteArray expectedSession = QByteArrayLiteral("VSP_LOCATE ")
+                                           + sessionId_.toLatin1();
+        const bool codeDiscovery = request == expectedCode;
+        const bool sessionLocation = request == expectedSession;
+        if (!codeDiscovery && !sessionLocation) {
             continue;
         }
         QJsonObject response;
@@ -214,7 +312,9 @@ void PhonePairingServer::readDiscoveryDatagrams()
         response.insert(QStringLiteral("host"), localAddress_);
         response.insert(QStringLiteral("port"), tcpServer_->serverPort());
         response.insert(QStringLiteral("session"), sessionId_);
-        response.insert(QStringLiteral("secret"), sessionSecret_);
+        if (codeDiscovery) {
+            response.insert(QStringLiteral("secret"), sessionSecret_);
+        }
         discoverySocket_->writeDatagram(
             QJsonDocument(response).toJson(QJsonDocument::Compact),
             datagram.senderAddress(),
@@ -235,46 +335,8 @@ void PhonePairingServer::generateCredentials()
 
 QString PhonePairingServer::chooseLocalIpv4Address() const
 {
-    QString bestAddress = QStringLiteral("127.0.0.1");
-    int bestScore = -1;
-    for (const QNetworkInterface& interface : QNetworkInterface::allInterfaces()) {
-        const auto flags = interface.flags();
-        if (!flags.testFlag(QNetworkInterface::IsUp)
-            || !flags.testFlag(QNetworkInterface::IsRunning)
-            || flags.testFlag(QNetworkInterface::IsLoopBack)) {
-            continue;
-        }
-        for (const QNetworkAddressEntry& entry : interface.addressEntries()) {
-            if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol) {
-                continue;
-            }
-            const QString address = entry.ip().toString();
-            if (address.startsWith(QStringLiteral("169.254."))) {
-                continue;
-            }
-            int score = 1;
-            if (address.startsWith(QStringLiteral("192.168."))) {
-                score += 30;
-            } else if (address.startsWith(QStringLiteral("10."))) {
-                score += 20;
-            } else if (entry.ip().isInSubnet(QHostAddress(QStringLiteral("172.16.0.0")),
-                                             12)) {
-                score += 10;
-            }
-            if (interface.type() == QNetworkInterface::Wifi) {
-                score += 50;
-            } else if (interface.type() == QNetworkInterface::Ethernet) {
-                score += 40;
-            } else if (interface.type() == QNetworkInterface::Virtual) {
-                score -= 100;
-            }
-            if (score > bestScore) {
-                bestScore = score;
-                bestAddress = address;
-            }
-        }
-    }
-    return bestAddress;
+    const QStringList addresses = localIpv4Addresses();
+    return addresses.isEmpty() ? QStringLiteral("127.0.0.1") : addresses.front();
 }
 
 bool PhonePairingServer::processHandshakeLine(const QByteArray& line)

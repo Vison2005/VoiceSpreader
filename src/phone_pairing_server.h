@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 
@@ -17,7 +18,8 @@ class PhonePairingServer : public QObject
     Q_OBJECT
 
 public:
-    explicit PhonePairingServer(QObject* parent = nullptr);
+    explicit PhonePairingServer(QObject* parent = nullptr,
+                                quint16 discoveryPort = 39741);
     ~PhonePairingServer() override;
 
     bool start(QString* errorMessage = nullptr);
@@ -27,7 +29,10 @@ public:
     QString pairingCode() const;
     QString pairingPayload() const;
     QString localAddress() const;
+    QStringList localIpv4Addresses() const;
+    bool setLocalAddress(const QString& address);
     quint16 serverPort() const;
+    quint16 discoveryPort() const;
     bool phoneConnected() const;
     QString connectedPhoneName() const;
     std::shared_ptr<RemoteMicrophoneBuffer> remoteBuffer() const;
@@ -60,5 +65,6 @@ private:
     QString pairingCode_;
     QString localAddress_;
     QString phoneName_;
+    quint16 discoveryPort_ = 39741;
     std::shared_ptr<RemoteMicrophoneBuffer> remoteBuffer_;
 };

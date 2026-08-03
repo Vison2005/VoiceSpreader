@@ -816,6 +816,16 @@ void MainWindow::showPhonePairing()
     title->setObjectName(QStringLiteral("SectionTitle"));
     layout->addWidget(title, 0, Qt::AlignHCenter);
 
+    auto* addressControls = new QHBoxLayout();
+    auto* addressTitle = new QLabel(QStringLiteral("二维码电脑地址"), &dialog);
+    auto* addressCombo = new QComboBox(&dialog);
+    addressCombo->addItems(phonePairingServer_.localIpv4Addresses());
+    addressCombo->setCurrentText(phonePairingServer_.localAddress());
+    addressCombo->setMinimumHeight(34);
+    addressControls->addWidget(addressTitle);
+    addressControls->addWidget(addressCombo, 1);
+    layout->addLayout(addressControls);
+
     auto* qrLabel = new QLabel(&dialog);
     qrLabel->setAlignment(Qt::AlignCenter);
     auto refreshQr = [&] {
@@ -840,6 +850,17 @@ void MainWindow::showPhonePairing()
     addressLabel->setAlignment(Qt::AlignCenter);
     addressLabel->setWordWrap(true);
     layout->addWidget(addressLabel);
+    connect(addressCombo, &QComboBox::currentTextChanged, &dialog,
+            [&](const QString& address) {
+                if (!phonePairingServer_.setLocalAddress(address)) {
+                    return;
+                }
+                refreshQr();
+                addressLabel->setText(
+                    QStringLiteral("电脑地址 %1:%2 · 手机和电脑必须连接同一局域网")
+                        .arg(phonePairingServer_.localAddress())
+                        .arg(phonePairingServer_.serverPort()));
+            });
 
     auto* actions = new QHBoxLayout();
     auto* regenerateButton = new QPushButton(QStringLiteral("生成新配对码"), &dialog);
