@@ -62,6 +62,7 @@ public:
     int targetBufferMilliseconds() const;
     int acousticDelayMilliseconds() const;
     std::uint32_t inputSampleRate() const;
+    const AudioDevice& device() const { return device_; }
 
 private:
     void run();

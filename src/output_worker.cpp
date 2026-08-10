@@ -608,6 +608,7 @@ void OutputWorker::run()
         std::vector<float> conversionBuffer;
         std::vector<BYTE> rawInputBuffer;
         double sourcePosition = 0.0;
+        std::uint64_t observedOverflowFrames = ringBuffer_->overflowFrames();
         const double nominalRatio = static_cast<double>(inputFormat.sampleRate)
                                     / static_cast<double>(renderFormat.sampleRate);
 
@@ -628,6 +629,19 @@ void OutputWorker::run()
             }
             if (writableFrames == 0) {
                 continue;
+            }
+
+            const std::uint64_t currentOverflowFrames = ringBuffer_->overflowFrames();
+            if (currentOverflowFrames != observedOverflowFrames) {
+                // 输出线程落后导致环形缓冲丢帧时，继续从旧读指针播放会把该设备
+                // 永久留在另一条时间线上。清空并重新预缓冲，宁可产生短暂静音。
+                ringBuffer_->clear();
+                playbackStarted_ = false;
+                conversionBuffer.clear();
+                sourcePosition = 0.0;
+                observedOverflowFrames = currentOverflowFrames;
+                report(QStringLiteral("输出设备发生缓冲溢出，正在重新建立同步缓冲：%1")
+                           .arg(device_.name));
             }
 
             BYTE* target = nullptr;

@@ -4,17 +4,22 @@
 #include "pairing_qr_code.h"
 #include "wasapi_device_manager.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QBoxLayout>
-#include <QCheckBox>
+#include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDialog>
+#include <QDir>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPalette>
@@ -26,13 +31,17 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScreen>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyle>
+#include <QSystemTrayIcon>
 #include <QTextEdit>
+#include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -125,6 +134,61 @@ QIcon createThemeIcon(bool darkTheme)
     return QIcon(pixmap);
 }
 
+QIcon createBluetoothIcon(int connectionState,
+                          bool darkTheme,
+                          bool busy,
+                          bool forceBlue = false)
+{
+    QPixmap pixmap(40, 40);
+    pixmap.setDevicePixelRatio(2.0);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const bool connected = connectionState == 1;
+    const QColor color(forceBlue
+                           ? QStringLiteral("#4382DF")
+                           : connected
+                                 ? QStringLiteral("#FFFFFF")
+                                 : darkTheme ? QStringLiteral("#AACCD6")
+                                             : QStringLiteral("#112E81"));
+    painter.setPen(QPen(color,
+                        busy ? 1.2 : 1.55,
+                        busy ? Qt::DashLine : Qt::SolidLine,
+                        Qt::RoundCap,
+                        Qt::RoundJoin));
+
+    QPainterPath upper;
+    upper.moveTo(9.5, 2.0);
+    upper.lineTo(15.0, 6.5);
+    upper.lineTo(5.5, 14.0);
+    painter.drawPath(upper);
+
+    QPainterPath lower;
+    lower.moveTo(9.5, 18.0);
+    lower.lineTo(15.0, 13.5);
+    lower.lineTo(5.5, 6.0);
+    painter.drawPath(lower);
+    painter.drawLine(QPointF(9.5, 2.0), QPointF(9.5, 18.0));
+
+    QColor statusColor(QStringLiteral("#98A6B5"));
+    if (connectionState == 1) {
+        statusColor = QColor(QStringLiteral("#55D88A"));
+    } else if (connectionState == 2) {
+        statusColor = QColor(QStringLiteral("#E05252"));
+    }
+    painter.setPen(QPen(QColor(forceBlue
+                                   ? darkTheme ? QStringLiteral("#07142F")
+                                               : QStringLiteral("#F3F7FB")
+                                   : connected ? QStringLiteral("#112E81")
+                                               : darkTheme ? QStringLiteral("#10284E")
+                                                           : QStringLiteral("#FFFFFF")),
+                        1.0));
+    painter.setBrush(statusColor);
+    painter.drawEllipse(QPointF(15.5, 15.5), 2.7, 2.7);
+    return QIcon(pixmap);
+}
+
 void refreshDynamicStyle(QWidget* widget)
 {
     if (widget == nullptr) {
@@ -141,6 +205,7 @@ MainWindow::MainWindow(QWidget* parent)
     , engine_(this)
     , calibrator_(this)
     , phonePairingServer_(this)
+    , bluetoothAudioReceiver_(this)
 {
     setWindowTitle(QStringLiteral("VoiceSpreader"));
     setWindowIcon(QIcon(QStringLiteral(":/assets/app.png")));
@@ -187,6 +252,12 @@ MainWindow::MainWindow(QWidget* parent)
     phoneMicrophoneButton_->setMinimumSize(108, 38);
     phoneMicrophoneButton_->setContextMenuPolicy(Qt::CustomContextMenu);
 
+    bluetoothButton_ = new QToolButton(root);
+    bluetoothButton_->setObjectName(QStringLiteral("BluetoothButton"));
+    bluetoothButton_->setIconSize(QSize(20, 20));
+    bluetoothButton_->setCursor(Qt::PointingHandCursor);
+    bluetoothButton_->setFixedSize(42, 38);
+
     themeButton_ = new QToolButton(root);
     themeButton_->setObjectName(QStringLiteral("ThemeButton"));
     themeButton_->setIconSize(QSize(20, 20));
@@ -198,6 +269,7 @@ MainWindow::MainWindow(QWidget* parent)
     headerLayout->addStretch();
     headerLayout->addWidget(phoneLevelMeter_, 0, Qt::AlignVCenter);
     headerLayout->addWidget(phoneMicrophoneButton_, 0, Qt::AlignVCenter);
+    headerLayout->addWidget(bluetoothButton_, 0, Qt::AlignVCenter);
     headerLayout->addWidget(themeButton_, 0, Qt::AlignVCenter);
     rootLayout->addLayout(headerLayout);
 
@@ -344,8 +416,12 @@ MainWindow::MainWindow(QWidget* parent)
     auto* optionsLayout = new QHBoxLayout();
     optionsLayout->setSpacing(6);
 
-    automaticLatencyCheck_ = new QCheckBox(QStringLiteral("自动补偿"), syncCard);
+    automaticLatencyCheck_ = new QPushButton(QStringLiteral("自动补偿"), syncCard);
+    automaticLatencyCheck_->setObjectName(QStringLiteral("OptionButton"));
+    automaticLatencyCheck_->setCheckable(true);
     automaticLatencyCheck_->setChecked(true);
+    automaticLatencyCheck_->setCursor(Qt::PointingHandCursor);
+    automaticLatencyCheck_->setMinimumHeight(32);
     auto* automaticHelp = createHelpButton(
         QStringLiteral("根据 Windows 音频端点报告的流延迟，自动延后较快设备；手动补偿仍会叠加。"),
         syncCard);
@@ -355,8 +431,12 @@ MainWindow::MainWindow(QWidget* parent)
     automaticLayout->addWidget(automaticHelp);
     optionsLayout->addLayout(automaticLayout);
 
-    continuousAcousticCheck_ = new QCheckBox(QStringLiteral("自同步"), syncCard);
+    continuousAcousticCheck_ = new QPushButton(QStringLiteral("自同步"), syncCard);
+    continuousAcousticCheck_->setObjectName(QStringLiteral("OptionButton"));
+    continuousAcousticCheck_->setCheckable(true);
     continuousAcousticCheck_->setChecked(true);
+    continuousAcousticCheck_->setCursor(Qt::PointingHandCursor);
+    continuousAcousticCheck_->setMinimumHeight(32);
     auto* acousticHelp = createHelpButton(
         QStringLiteral("播放中使用自适应声学探针复核设备间漂移；仅在节目声足以掩蔽探针时发送。"),
         syncCard);
@@ -366,8 +446,12 @@ MainWindow::MainWindow(QWidget* parent)
     acousticLayout->addWidget(acousticHelp);
     optionsLayout->addLayout(acousticLayout);
 
-    exclusiveModeCheck_ = new QCheckBox(QStringLiteral("独占输出"), syncCard);
+    exclusiveModeCheck_ = new QPushButton(QStringLiteral("独占输出"), syncCard);
+    exclusiveModeCheck_->setObjectName(QStringLiteral("OptionButton"));
+    exclusiveModeCheck_->setCheckable(true);
     exclusiveModeCheck_->setChecked(false);
+    exclusiveModeCheck_->setCursor(Qt::PointingHandCursor);
+    exclusiveModeCheck_->setMinimumHeight(32);
     auto* exclusiveHelp = createHelpButton(
         QStringLiteral("绕过共享混音以降低输出延迟；同一驱动的多个端点可能互斥，仅建议独立物理声卡使用。"),
         syncCard);
@@ -413,15 +497,24 @@ MainWindow::MainWindow(QWidget* parent)
     stateLabel_ = new QLabel(QStringLiteral("未启动"), actionBar);
     stateLabel_->setObjectName(QStringLiteral("StatusLabel"));
     stateLabel_->setProperty("running", false);
-    auto* stateHint = new QLabel(QStringLiteral("配置设备后开始同步"), actionBar);
-    stateHint->setObjectName(QStringLiteral("MutedText"));
+    minimizeToTrayButton_ = new QPushButton(
+        QStringLiteral("最小化到托盘"), actionBar);
+    minimizeToTrayButton_->setObjectName(QStringLiteral("ActionUtilityButton"));
+    minimizeToTrayButton_->setCursor(Qt::PointingHandCursor);
+    minimizeToTrayButton_->setMinimumSize(120, 42);
+    autoStartButton_ = new QPushButton(QStringLiteral("开机自启动"), actionBar);
+    autoStartButton_->setObjectName(QStringLiteral("ActionUtilityButton"));
+    autoStartButton_->setCursor(Qt::PointingHandCursor);
+    autoStartButton_->setCheckable(true);
+    autoStartButton_->setMinimumSize(112, 42);
     startButton_ = new QPushButton(QStringLiteral("开始同步"), actionBar);
     startButton_->setObjectName(QStringLiteral("PrimaryButton"));
     startButton_->setCursor(Qt::PointingHandCursor);
     startButton_->setMinimumSize(140, 42);
     startButton_->setProperty("running", false);
     actionLayout->addWidget(stateLabel_);
-    actionLayout->addWidget(stateHint);
+    actionLayout->addWidget(minimizeToTrayButton_);
+    actionLayout->addWidget(autoStartButton_);
     actionLayout->addStretch();
     actionLayout->addWidget(startButton_);
     rootLayout->addWidget(actionBar);
@@ -429,6 +522,12 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(root);
 
     connect(themeButton_, &QToolButton::clicked, this, &MainWindow::toggleTheme);
+    connect(minimizeToTrayButton_, &QPushButton::clicked,
+            this, &MainWindow::minimizeToTray);
+    connect(autoStartButton_, &QPushButton::clicked,
+            this, &MainWindow::setAutoStartEnabled);
+    connect(bluetoothButton_, &QToolButton::clicked,
+            this, &MainWindow::showBluetoothAudioReceiver);
     connect(refreshButton_, &QPushButton::clicked, this, &MainWindow::refreshDevices);
     connect(captureCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::rebuildOutputCards);
@@ -455,20 +554,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&engine_, &AudioEngine::programLevelChanged,
             this, &MainWindow::updateProgramLevel);
     connect(phoneMicrophoneButton_, &QToolButton::clicked, this,
-            [this](bool checked) {
-                if (engine_.isActive() || calibrator_.isActive()) {
-                    const QSignalBlocker blocker(phoneMicrophoneButton_);
-                    phoneMicrophoneButton_->setChecked(!checked);
-                    QToolTip::showText(
-                        phoneMicrophoneButton_->mapToGlobal(
-                            QPoint(phoneMicrophoneButton_->width() / 2,
-                                   phoneMicrophoneButton_->height())),
-                        QStringLiteral("请先停止同步或校准，再切换手机麦克风。"),
-                        phoneMicrophoneButton_);
-                    updatePhoneButtonAppearance();
-                    return;
-                }
+            [this](bool) {
                 if (phoneConnectionState_ == 1) {
+                    const QSignalBlocker blocker(phoneMicrophoneButton_);
+                    phoneMicrophoneButton_->setChecked(phoneMicrophoneActive_);
+                    phonePairingServer_.setMicrophoneEnabled(
+                        !phoneMicrophoneActive_);
                     updatePhoneButtonAppearance();
                     return;
                 }
@@ -492,8 +583,44 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::appendStatus);
     connect(&phonePairingServer_, &PhonePairingServer::connectionChanged,
             this, &MainWindow::updatePhoneConnection);
+    connect(&phonePairingServer_,
+            &PhonePairingServer::microphoneStreamingChanged,
+            this,
+            &MainWindow::updatePhoneMicrophoneStreaming);
     connect(&phonePairingServer_, &PhonePairingServer::microphoneLevelChanged,
             this, &MainWindow::updatePhoneMicrophoneLevel);
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::statusChanged,
+            this,
+            &MainWindow::appendStatus);
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::errorOccurred,
+            this,
+            [this](const QString& message) {
+                bluetoothConnectionState_ = 2;
+                appendStatus(message);
+                updateBluetoothButtonAppearance();
+            });
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::connectionChanged,
+            this,
+            &MainWindow::updateBluetoothConnection);
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::busyChanged,
+            this,
+            [this](bool busy) {
+                bluetoothBusy_ = busy;
+                updateBluetoothButtonAppearance();
+            });
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::availabilityChanged,
+            this,
+            [this](bool available) {
+                if (available && bluetoothConnectionState_ == 2) {
+                    bluetoothConnectionState_ = 0;
+                    updateBluetoothButtonAppearance();
+                }
+            });
     connect(&calibrator_, &LatencyCalibrator::statusChanged,
             this, &MainWindow::appendStatus);
     connect(&calibrator_, &LatencyCalibrator::errorOccurred,
@@ -513,14 +640,159 @@ MainWindow::MainWindow(QWidget* parent)
         appendStatus(QStringLiteral("手机配对服务启动失败：%1").arg(pairingError));
     }
     updatePhoneButtonAppearance();
+    updateBluetoothButtonAppearance();
+    initializeSystemTray();
+    updateAutoStartButtonAppearance();
     updateResponsiveLayout();
 }
 
 MainWindow::~MainWindow()
 {
+    if (trayIcon_ != nullptr) {
+        trayIcon_->hide();
+    }
     calibrator_.stop();
     engine_.stop();
     phonePairingServer_.stop();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (!quitting_ && trayIcon_ != nullptr && trayIcon_->isVisible()) {
+        event->ignore();
+        minimizeToTray();
+        return;
+    }
+
+    QMainWindow::closeEvent(event);
+    if (trayIcon_ == nullptr) {
+        qApp->quit();
+    }
+}
+
+void MainWindow::initializeSystemTray()
+{
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        minimizeToTrayButton_->setEnabled(false);
+        minimizeToTrayButton_->setToolTip(
+            QStringLiteral("当前桌面环境没有可用的系统托盘。"));
+        appendStatus(QStringLiteral("系统托盘不可用，关闭窗口将退出程序。"));
+        return;
+    }
+
+    trayIcon_ = new QSystemTrayIcon(windowIcon(), this);
+    trayIcon_->setToolTip(QStringLiteral("VoiceSpreader"));
+
+    auto* trayMenu = new QMenu(this);
+    QAction* restoreAction = trayMenu->addAction(QStringLiteral("显示 VoiceSpreader"));
+    QAction* minimizeAction = trayMenu->addAction(QStringLiteral("最小化到托盘"));
+    trayMenu->addSeparator();
+    QAction* quitAction = trayMenu->addAction(QStringLiteral("退出"));
+    trayIcon_->setContextMenu(trayMenu);
+
+    connect(restoreAction, &QAction::triggered,
+            this, &MainWindow::restoreFromTray);
+    connect(minimizeAction, &QAction::triggered,
+            this, &MainWindow::minimizeToTray);
+    connect(quitAction, &QAction::triggered, this, [this] {
+        quitting_ = true;
+        if (trayIcon_ != nullptr) {
+            trayIcon_->hide();
+        }
+        close();
+        qApp->quit();
+    });
+    connect(trayIcon_, &QSystemTrayIcon::activated, this,
+            [this](QSystemTrayIcon::ActivationReason reason) {
+                if (reason == QSystemTrayIcon::Trigger
+                    || reason == QSystemTrayIcon::DoubleClick) {
+                    restoreFromTray();
+                }
+            });
+
+    trayIcon_->show();
+    minimizeToTrayButton_->setToolTip(
+        QStringLiteral("隐藏主窗口并继续保持同步、手机和蓝牙连接。"));
+}
+
+void MainWindow::minimizeToTray()
+{
+    if (trayIcon_ == nullptr || !trayIcon_->isVisible()) {
+        showMinimized();
+        return;
+    }
+
+    hide();
+    if (!trayMessageShown_) {
+        trayIcon_->showMessage(
+            QStringLiteral("VoiceSpreader 正在后台运行"),
+            QStringLiteral("同步和设备连接会继续保持；点击托盘图标可恢复窗口。"),
+            QSystemTrayIcon::Information,
+            3500);
+        trayMessageShown_ = true;
+    }
+}
+
+void MainWindow::restoreFromTray()
+{
+    show();
+    setWindowState((windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+    raise();
+    activateWindow();
+}
+
+bool MainWindow::isAutoStartEnabled() const
+{
+    QSettings settings(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+        QSettings::NativeFormat);
+    return settings.contains(QStringLiteral("VoiceSpreader"));
+}
+
+void MainWindow::setAutoStartEnabled(bool enabled)
+{
+    QSettings settings(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+        QSettings::NativeFormat);
+    if (enabled) {
+        const QString executablePath = QDir::toNativeSeparators(
+            QCoreApplication::applicationFilePath());
+        settings.setValue(
+            QStringLiteral("VoiceSpreader"),
+            QStringLiteral("\"%1\" --start-minimized").arg(executablePath));
+    } else {
+        settings.remove(QStringLiteral("VoiceSpreader"));
+    }
+    settings.sync();
+
+    if (settings.status() != QSettings::NoError) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("VoiceSpreader"),
+            QStringLiteral("无法修改当前用户的开机启动设置，请检查注册表权限。"));
+        appendStatus(QStringLiteral("开机自启动设置修改失败。"));
+    } else {
+        appendStatus(enabled
+                         ? QStringLiteral("已启用开机自启动，将直接进入系统托盘。")
+                         : QStringLiteral("已关闭开机自启动。"));
+    }
+    updateAutoStartButtonAppearance();
+}
+
+void MainWindow::updateAutoStartButtonAppearance()
+{
+    if (autoStartButton_ == nullptr) {
+        return;
+    }
+
+    const bool enabled = isAutoStartEnabled();
+    const QSignalBlocker blocker(autoStartButton_);
+    autoStartButton_->setChecked(enabled);
+    autoStartButton_->setToolTip(
+        enabled
+            ? QStringLiteral("已启用：登录 Windows 后自动在托盘中运行。")
+            : QStringLiteral("登录 Windows 后自动启动并最小化到托盘。"));
+    refreshDynamicStyle(autoStartButton_);
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event)
@@ -670,9 +942,13 @@ void MainWindow::rebuildOutputCards()
         cardLayout->setSpacing(9);
 
         auto* cardHeader = new QHBoxLayout();
-        auto* enabledCheck = new QCheckBox(device.name, card);
-        enabledCheck->setObjectName(QStringLiteral("DeviceCheck"));
+        auto* enabledCheck = new QPushButton(device.name, card);
+        enabledCheck->setObjectName(QStringLiteral("DeviceSelector"));
+        enabledCheck->setCheckable(true);
         enabledCheck->setChecked(selectedIds.contains(device.id));
+        enabledCheck->setCursor(Qt::PointingHandCursor);
+        enabledCheck->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        enabledCheck->setMinimumHeight(32);
         cardHeader->addWidget(enabledCheck, 1);
         if (device.isDefault) {
             auto* defaultBadge = new QLabel(QStringLiteral("默认"), card);
@@ -725,7 +1001,7 @@ void MainWindow::rebuildOutputCards()
         delaySpinBoxes_.insert(device.id, delaySpin);
         acousticLabels_.insert(device.id, acousticLabel);
 
-        connect(enabledCheck, &QCheckBox::toggled, this,
+        connect(enabledCheck, &QPushButton::toggled, this,
                 [this, card](bool checked) {
                     card->setProperty("selected", checked);
                     refreshDynamicStyle(card);
@@ -771,7 +1047,7 @@ void MainWindow::startAudio()
     const bool continuousTracking = continuousAcousticCheck_->isChecked()
                                     && outputs.size() >= 2;
     const bool usePhoneMicrophone = continuousTracking
-                                    && phoneMicrophoneButton_->isChecked()
+                                    && phoneMicrophoneActive_
                                     && phonePairingServer_.phoneConnected();
     if (continuousTracking && !usePhoneMicrophone && microphone.id.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("无法启动声学跟踪"),
@@ -1067,22 +1343,267 @@ void MainWindow::showPhonePairing()
     dialog.exec();
 }
 
+void MainWindow::showBluetoothAudioReceiver()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("VoiceSpreader"));
+    dialog.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+    dialog.setMinimumSize(500, 420);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(20, 18, 20, 18);
+    layout->setSpacing(12);
+
+    auto* header = new QHBoxLayout();
+    auto* iconLabel = new QLabel(&dialog);
+    iconLabel->setFixedSize(36, 36);
+    iconLabel->setAlignment(Qt::AlignCenter);
+    iconLabel->setPixmap(
+        createBluetoothIcon(bluetoothConnectionState_, darkTheme_, false, true)
+            .pixmap(QSize(24, 24)));
+    auto* titleLayout = new QVBoxLayout();
+    titleLayout->setSpacing(2);
+    auto* title = new QLabel(QStringLiteral("蓝牙音频共享"), &dialog);
+    title->setObjectName(QStringLiteral("SectionTitle"));
+    auto* subtitle = new QLabel(
+        QStringLiteral("移动设备声音会从 Windows 当前选择的设备播放。"),
+        &dialog);
+    subtitle->setObjectName(QStringLiteral("MutedText"));
+    subtitle->setWordWrap(true);
+    titleLayout->addWidget(title);
+    titleLayout->addWidget(subtitle);
+    header->addWidget(iconLabel, 0, Qt::AlignTop);
+    header->addLayout(titleLayout, 1);
+    layout->addLayout(header);
+
+    auto* statusLabel = new QLabel(&dialog);
+    statusLabel->setObjectName(QStringLiteral("BluetoothStatus"));
+    statusLabel->setWordWrap(true);
+    statusLabel->setProperty("state", bluetoothConnectionState_);
+    statusLabel->setText(
+        bluetoothConnectionState_ == 1
+            ? QStringLiteral("已连接 %1。").arg(connectedBluetoothDeviceName_)
+            : QStringLiteral("正在查找已配对且支持蓝牙音频发送的手机……"));
+    layout->addWidget(statusLabel);
+
+    auto* deviceList = new QListWidget(&dialog);
+    deviceList->setObjectName(QStringLiteral("BluetoothDeviceList"));
+    deviceList->setSelectionMode(QAbstractItemView::SingleSelection);
+    deviceList->setMinimumHeight(190);
+    deviceList->setAlternatingRowColors(false);
+    layout->addWidget(deviceList, 1);
+
+    auto* hintLabel = new QLabel(
+        QStringLiteral("未配对时，请先在 Windows 蓝牙设置中添加手机；配对后返回并刷新。"),
+        &dialog);
+    hintLabel->setObjectName(QStringLiteral("MutedText"));
+    hintLabel->setWordWrap(true);
+    layout->addWidget(hintLabel);
+
+    auto* actions = new QHBoxLayout();
+    actions->setSpacing(8);
+    auto* pairButton = new QPushButton(QStringLiteral("配对新设备"), &dialog);
+    pairButton->setObjectName(QStringLiteral("SecondaryButton"));
+    auto* refreshButton = new QPushButton(QStringLiteral("刷新"), &dialog);
+    refreshButton->setObjectName(QStringLiteral("SecondaryButton"));
+    auto* disconnectButton = new QPushButton(QStringLiteral("断开"), &dialog);
+    disconnectButton->setObjectName(QStringLiteral("SecondaryButton"));
+    auto* connectButton = new QPushButton(QStringLiteral("连接并接收声音"), &dialog);
+    connectButton->setObjectName(QStringLiteral("PrimaryButton"));
+    for (QPushButton* button : {pairButton,
+                                refreshButton,
+                                disconnectButton,
+                                connectButton}) {
+        button->setMinimumHeight(36);
+        button->setCursor(Qt::PointingHandCursor);
+    }
+    actions->addWidget(pairButton);
+    actions->addWidget(refreshButton);
+    actions->addStretch();
+    actions->addWidget(disconnectButton);
+    actions->addWidget(connectButton);
+    layout->addLayout(actions);
+
+    auto updateControls = [this,
+                           deviceList,
+                           pairButton,
+                           refreshButton,
+                           connectButton,
+                           disconnectButton] {
+        const bool hasSelection = deviceList->currentItem() != nullptr;
+        deviceList->setEnabled(!bluetoothBusy_);
+        pairButton->setEnabled(!bluetoothBusy_);
+        refreshButton->setEnabled(!bluetoothBusy_);
+        connectButton->setEnabled(!bluetoothBusy_ && hasSelection);
+        disconnectButton->setEnabled(!bluetoothBusy_
+                                     && bluetoothConnectionState_ == 1);
+        connectButton->setText(bluetoothBusy_
+                                   ? QStringLiteral("正在连接……")
+                                   : QStringLiteral("连接并接收声音"));
+    };
+    updateControls();
+
+    connect(deviceList, &QListWidget::currentItemChanged,
+            &dialog, [=](QListWidgetItem*, QListWidgetItem*) {
+                updateControls();
+            });
+    connect(deviceList, &QListWidget::itemDoubleClicked,
+            &dialog, [this](QListWidgetItem* item) {
+                if (item == nullptr || bluetoothBusy_) {
+                    return;
+                }
+                bluetoothAudioReceiver_.connectDevice(
+                    item->data(Qt::UserRole).toString(), item->text());
+            });
+    connect(pairButton, &QPushButton::clicked, &dialog, [] {
+        QDesktopServices::openUrl(QUrl(QStringLiteral("ms-settings:bluetooth")));
+    });
+    connect(refreshButton, &QPushButton::clicked,
+            &dialog, [this] { bluetoothAudioReceiver_.refreshDevices(); });
+    connect(disconnectButton, &QPushButton::clicked,
+            &dialog, [this] { bluetoothAudioReceiver_.disconnectDevice(); });
+    connect(connectButton, &QPushButton::clicked,
+            &dialog, [this, deviceList] {
+                QListWidgetItem* item = deviceList->currentItem();
+                if (item == nullptr) {
+                    return;
+                }
+                bluetoothAudioReceiver_.connectDevice(
+                    item->data(Qt::UserRole).toString(), item->text());
+            });
+
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::devicesChanged,
+            &dialog,
+            [=](const QStringList& deviceIds, const QStringList& deviceNames) {
+                deviceList->clear();
+                for (int index = 0;
+                     index < deviceIds.size() && index < deviceNames.size();
+                     ++index) {
+                    auto* item = new QListWidgetItem(
+                        createBluetoothIcon(0, darkTheme_, false),
+                        deviceNames.at(index),
+                        deviceList);
+                    item->setData(Qt::UserRole, deviceIds.at(index));
+                    item->setToolTip(QStringLiteral("双击即可连接并接收声音"));
+                    if (deviceNames.at(index)
+                        == connectedBluetoothDeviceName_) {
+                        item->setSelected(true);
+                        deviceList->setCurrentItem(item);
+                    }
+                }
+                if (deviceList->count() > 0
+                    && deviceList->currentItem() == nullptr) {
+                    deviceList->setCurrentRow(0);
+                }
+                statusLabel->setProperty(
+                    "state", bluetoothConnectionState_ == 1 ? 1 : 0);
+                statusLabel->setText(
+                    deviceList->count() == 0
+                        ? QStringLiteral("没有找到兼容设备。请先完成系统蓝牙配对，再点击刷新。")
+                        : bluetoothConnectionState_ == 1
+                            ? QStringLiteral("已连接 %1。").arg(connectedBluetoothDeviceName_)
+                            : QStringLiteral("选择手机，然后连接并在手机上把音频输出切换到这台电脑。"));
+                refreshDynamicStyle(statusLabel);
+                updateControls();
+            });
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::busyChanged,
+            &dialog,
+            [=](bool busy) {
+                if (busy) {
+                    statusLabel->setProperty("state", 0);
+                    statusLabel->setText(
+                        deviceList->count() == 0
+                            ? QStringLiteral("正在查找已配对设备……")
+                            : QStringLiteral("正在建立蓝牙音频连接……"));
+                    refreshDynamicStyle(statusLabel);
+                }
+                updateControls();
+            });
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::connectionChanged,
+            &dialog,
+            [=](bool connected, const QString& deviceName) {
+                statusLabel->setProperty("state", connected ? 1 : 0);
+                statusLabel->setText(
+                    connected
+                        ? QStringLiteral("已连接 %1。").arg(deviceName)
+                        : QStringLiteral("蓝牙音频接收已断开。"));
+                iconLabel->setPixmap(
+                    createBluetoothIcon(connected ? 1 : 0,
+                                        darkTheme_,
+                                        false,
+                                        true)
+                        .pixmap(QSize(24, 24)));
+                refreshDynamicStyle(statusLabel);
+                updateControls();
+            });
+    connect(&bluetoothAudioReceiver_,
+            &BluetoothAudioReceiver::errorOccurred,
+            &dialog,
+            [=](const QString& message) {
+                statusLabel->setProperty("state", 2);
+                statusLabel->setText(message);
+                refreshDynamicStyle(statusLabel);
+                updateControls();
+            });
+
+    bluetoothAudioReceiver_.refreshDevices();
+    dialog.exec();
+}
+
 void MainWindow::updatePhoneConnection(bool connected, const QString& phoneName)
 {
     if (connected) {
         phoneConnectionState_ = 1;
         connectedPhoneName_ = phoneName;
         phoneMicrophoneLevelDbfs_ = -160.0;
-        phoneMicrophoneButton_->setChecked(false);
+        phoneMicrophoneActive_ = phonePairingServer_.microphoneStreaming();
     } else {
         phoneConnectionState_ = 0;
         connectedPhoneName_.clear();
         phoneMicrophoneLevelDbfs_ = -160.0;
-        phoneMicrophoneButton_->setChecked(false);
+        phoneMicrophoneActive_ = false;
     }
-    phoneLevelMeter_->setConnected(connected);
+    {
+        const QSignalBlocker blocker(phoneMicrophoneButton_);
+        phoneMicrophoneButton_->setChecked(phoneMicrophoneActive_);
+    }
+    phoneLevelMeter_->setConnected(connected && phoneMicrophoneActive_);
     phoneLevelMeter_->setLevelDbfs(phoneMicrophoneLevelDbfs_);
     updatePhoneButtonAppearance();
+}
+
+void MainWindow::updatePhoneMicrophoneStreaming(bool enabled)
+{
+    const bool changed = phoneMicrophoneActive_ != enabled;
+    phoneMicrophoneActive_ = enabled;
+    phoneMicrophoneLevelDbfs_ = -160.0;
+    {
+        const QSignalBlocker blocker(phoneMicrophoneButton_);
+        phoneMicrophoneButton_->setChecked(enabled);
+    }
+    phoneLevelMeter_->setConnected(phoneConnectionState_ == 1 && enabled);
+    phoneLevelMeter_->setLevelDbfs(phoneMicrophoneLevelDbfs_);
+    updatePhoneButtonAppearance();
+
+    if (!changed || !engine_.isActive()
+        || !continuousAcousticCheck_->isChecked()) {
+        return;
+    }
+
+    // 声学跟踪器在启动时选择捕获时钟；切换手机麦克风后只重启音频图，
+    // 保留当前设备、音量与延迟配置，使新麦克风立即成为同步基准。
+    appendStatus(enabled
+                     ? QStringLiteral("正在切换为手机麦克风，音频同步将自动重启。")
+                     : QStringLiteral("手机麦克风已停用，音频同步将切回本机麦克风。"));
+    stopAudio();
+    QTimer::singleShot(0, this, [this] {
+        if (!engine_.isActive()) {
+            startAudio();
+        }
+    });
 }
 
 void MainWindow::updatePhoneMicrophoneLevel(double levelDbfs)
@@ -1103,21 +1624,23 @@ void MainWindow::updatePhoneButtonAppearance()
     phoneMicrophoneButton_->setIcon(
         createPhoneStatusIcon(phoneConnectionState_,
                               darkTheme_,
-                              phoneMicrophoneButton_->isChecked()));
+                              phoneMicrophoneActive_));
     phoneMicrophoneButton_->setProperty("connectionState", phoneConnectionState_);
 
     if (phoneConnectionState_ == 1) {
-        const QString levelText = phoneMicrophoneLevelDbfs_ <= -150.0
-                                      ? QStringLiteral("等待采样")
-                                      : QStringLiteral("%1 dBFS")
-                                            .arg(phoneMicrophoneLevelDbfs_, 0, 'f', 1);
+        const QString levelText = !phoneMicrophoneActive_
+                                      ? QStringLiteral("已停止并释放")
+                                      : phoneMicrophoneLevelDbfs_ <= -150.0
+                                            ? QStringLiteral("等待采样")
+                                            : QStringLiteral("%1 dBFS")
+                                                  .arg(phoneMicrophoneLevelDbfs_, 0, 'f', 1);
         phoneMicrophoneButton_->setToolTip(
             QStringLiteral("已连接：%1\n手机麦克风：%2\n%3")
                 .arg(connectedPhoneName_,
                      levelText,
-                     phoneMicrophoneButton_->isChecked()
-                         ? QStringLiteral("当前用于自同步；点击停用")
-                         : QStringLiteral("当前未使用；点击启用")));
+                     phoneMicrophoneActive_
+                          ? QStringLiteral("当前用于自同步；点击停用")
+                          : QStringLiteral("当前未使用；点击启用")));
     } else if (phoneConnectionState_ == 2) {
         phoneMicrophoneButton_->setToolTip(
             QStringLiteral("手机配对服务异常；点击重试。"));
@@ -1126,9 +1649,45 @@ void MainWindow::updatePhoneButtonAppearance()
             QStringLiteral("手机未连接；点击打开二维码和配对码。"));
     }
 
-    // 保持按钮可用，确保同步过程中仍能通过右键主动断开手机。
+    // 配对和麦克风控制与音频引擎解耦，同步过程中也必须始终可用。
     phoneMicrophoneButton_->setEnabled(true);
     refreshDynamicStyle(phoneMicrophoneButton_);
+}
+
+void MainWindow::updateBluetoothConnection(bool connected,
+                                           const QString& deviceName)
+{
+    bluetoothConnectionState_ = connected ? 1 : 0;
+    connectedBluetoothDeviceName_ = connected ? deviceName : QString();
+    updateBluetoothButtonAppearance();
+}
+
+void MainWindow::updateBluetoothButtonAppearance()
+{
+    if (bluetoothButton_ == nullptr) {
+        return;
+    }
+    bluetoothButton_->setProperty("connectionState",
+                                  bluetoothConnectionState_);
+    bluetoothButton_->setIcon(
+        createBluetoothIcon(bluetoothConnectionState_,
+                            darkTheme_,
+                            bluetoothBusy_));
+    if (bluetoothBusy_) {
+        bluetoothButton_->setToolTip(QStringLiteral("正在处理蓝牙音频连接……"));
+    } else if (bluetoothConnectionState_ == 1) {
+        bluetoothButton_->setToolTip(
+            QStringLiteral("已连接 %1；点击管理或断开。")
+                .arg(connectedBluetoothDeviceName_));
+    } else if (bluetoothConnectionState_ == 2) {
+        bluetoothButton_->setToolTip(
+            QStringLiteral("蓝牙音频接收异常；点击查看并重试。"));
+    } else {
+        bluetoothButton_->setToolTip(
+            QStringLiteral("打开蓝牙音频共享。"));
+    }
+    bluetoothButton_->setEnabled(!bluetoothBusy_);
+    refreshDynamicStyle(bluetoothButton_);
 }
 
 void MainWindow::appendStatus(const QString& message)
@@ -1168,7 +1727,7 @@ void MainWindow::updateRunningState(bool running)
 void MainWindow::updateSelectionSummary()
 {
     int count = 0;
-    for (QCheckBox* check : outputChecks_) {
+    for (QPushButton* check : outputChecks_) {
         if (check->isChecked()) {
             ++count;
         }
@@ -1210,7 +1769,7 @@ QVector<OutputDeviceSettings> MainWindow::selectedOutputDevices() const
 {
     QVector<OutputDeviceSettings> outputs;
     for (const AudioDevice& device : devices_) {
-        const QCheckBox* enabledCheck = outputChecks_.value(device.id, nullptr);
+        const QPushButton* enabledCheck = outputChecks_.value(device.id, nullptr);
         if (enabledCheck == nullptr || !enabledCheck->isChecked()) {
             continue;
         }
@@ -1239,7 +1798,7 @@ void MainWindow::setControlsEnabled(bool enabled)
     startButton_->setEnabled(enabled || engine_.isActive());
     calibrateButton_->setEnabled(enabled || calibrator_.isActive());
 
-    for (QCheckBox* check : outputChecks_) {
+    for (QPushButton* check : outputChecks_) {
         check->setEnabled(enabled);
     }
     for (auto iterator = delaySpinBoxes_.cbegin(); iterator != delaySpinBoxes_.cend(); ++iterator) {
@@ -1310,12 +1869,20 @@ QLabel#ProgramLevel[active="true"] { color: #112E81; background: #E4EEFC; }
 QLabel#CountBadge { color: #4647AE; background: #EEF0FF; border: 1px solid #D7DCF5; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700; }
 QLabel#StatusLabel { color: #355270; background: #EAF1F6; border-radius: 11px; padding: 5px 11px; font-weight: 700; }
 QLabel#StatusLabel[running="true"] { color: #112E81; background: #DDEBFB; }
+QLabel#BluetoothStatus { color: #49647E; background: #EDF3F7; border: 1px solid #D8E5ED; border-radius: 9px; padding: 9px 11px; }
+QLabel#BluetoothStatus[state="1"] { color: #17633B; background: #E6F6ED; border-color: #A9DFC1; }
+QLabel#BluetoothStatus[state="2"] { color: #A32F2F; background: #FFF0F0; border-color: #E8B4B4; }
 QFrame#Card, QFrame#ActionBar { background: #FFFFFF; border: 1px solid #D8E5ED; border-radius: 14px; }
 QFrame#DeviceCard { background: #F8FBFD; border: 1px solid #DFE9EF; border-radius: 10px; }
-QFrame#DeviceCard[selected="true"] { background: #EAF2FE; border: 1px solid #4382DF; }
-QCheckBox#DeviceCheck { color: #162C54; font-size: 13px; font-weight: 500; spacing: 9px; }
-QCheckBox { color: #314668; spacing: 8px; }
-QCheckBox::indicator { width: 17px; height: 17px; }
+QFrame#DeviceCard[selected="true"] { background: #F8FBFD; border: 2px solid #4382DF; }
+QPushButton#DeviceSelector { color: #162C54; background: transparent; border: none; border-radius: 7px; padding: 5px 8px; text-align: left; font-size: 13px; font-weight: 600; }
+QPushButton#DeviceSelector:hover { color: #112E81; background: #E5EFFB; }
+QPushButton#DeviceSelector:checked { color: #112E81; background: transparent; }
+QPushButton#DeviceSelector:disabled { color: #162C54; background: transparent; border: none; }
+QPushButton#OptionButton { color: #314668; background: #EDF3F7; border: 1px solid #D8E5ED; border-radius: 9px; padding: 0 10px; }
+QPushButton#OptionButton:hover { color: #112E81; background: #E3EDF5; border-color: #AACCD6; }
+QPushButton#OptionButton:checked { color: #FFFFFF; background: #4647AE; border-color: #4647AE; }
+QPushButton#OptionButton:checked:disabled { color: #FFFFFF; background: #5960A8; border-color: #5960A8; }
 QComboBox, QSpinBox { color: #162C54; background: #FFFFFF; border: 1px solid #C8D9E4; border-radius: 8px; padding: 6px 34px 6px 12px; selection-background-color: #4382DF; }
 QComboBox:hover, QSpinBox:hover { border-color: #4382DF; }
 QComboBox:focus, QSpinBox:focus { border: 1px solid #4647AE; }
@@ -1333,9 +1900,15 @@ QPushButton#PrimaryButton { color: #FFFFFF; background: #112E81; border: 1px sol
 QPushButton#PrimaryButton:hover { background: #4647AE; border-color: #4647AE; }
 QPushButton#PrimaryButton:pressed { background: #0D246A; border-color: #0D246A; }
 QPushButton#PrimaryButton[running="true"] { background: #4647AE; border-color: #4647AE; }
-QPushButton#SecondaryButton, QToolButton#ThemeButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; }
-QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover { background: #EAF2FA; border-color: #4382DF; }
-QToolButton#ThemeButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QPushButton#ActionUtilityButton { color: #112E81; background: #EEF5FC; border: 1px solid #AACCD6; border-radius: 10px; }
+QPushButton#ActionUtilityButton:hover { background: #DDEBFB; border-color: #4382DF; }
+QPushButton#ActionUtilityButton:pressed { background: #CFDFF0; border-color: #4647AE; }
+QPushButton#ActionUtilityButton:checked { color: #FFFFFF; background: #4647AE; border-color: #4647AE; }
+QPushButton#SecondaryButton, QToolButton#ThemeButton, QToolButton#BluetoothButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; }
+QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover, QToolButton#BluetoothButton:hover { background: #EAF2FA; border-color: #4382DF; }
+QToolButton#ThemeButton, QToolButton#BluetoothButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QToolButton#BluetoothButton[connectionState="1"] { background: #112E81; border-color: #112E81; }
+QToolButton#BluetoothButton[connectionState="2"] { border-color: #E05252; }
 QToolButton#PhoneButton { color: #112E81; background: #FFFFFF; border: 1px solid #AACCD6; border-radius: 10px; padding: 0 10px; font-weight: 500; }
 QToolButton#PhoneButton:hover { background: #EAF2FA; border-color: #4382DF; }
 QToolButton#PhoneButton:checked { color: #FFFFFF; background: #112E81; border-color: #112E81; }
@@ -1348,6 +1921,10 @@ QSlider::groove:horizontal { height: 7px; background: #DCE8EF; border-radius: 4p
 QSlider::sub-page:horizontal { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4647AE, stop:1 #4382DF); border-radius: 4px; }
 QSlider::handle:horizontal { image: url(:/controls/slider_handle_light.svg); width: 20px; height: 20px; margin: -7px 0; background: transparent; border: none; }
 QTextEdit#LogView { color: #314668; background: #F7FAFC; border: 1px solid #D8E5ED; border-radius: 9px; padding: 7px; font-size: 11px; }
+QListWidget#BluetoothDeviceList { color: #162C54; background: #FFFFFF; border: 1px solid #D8E5ED; border-radius: 10px; outline: none; padding: 5px; }
+QListWidget#BluetoothDeviceList::item { min-height: 38px; border-radius: 7px; padding: 4px 9px; }
+QListWidget#BluetoothDeviceList::item:hover { background: #EEF5FC; }
+QListWidget#BluetoothDeviceList::item:selected { color: #112E81; background: #DDEBFB; border: 1px solid #AACCD6; }
 QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #AACCD6; border-radius: 14px; }
 QLabel#PairingCode { color: #112E81; background: #EAF2FA; border-radius: 9px; padding: 8px; }
 QScrollArea#OutputScroll, QScrollArea#ContentScroll { background: transparent; border: none; }
@@ -1376,12 +1953,20 @@ QLabel#ProgramLevel[active="true"] { color: #D9E9FF; background: #19376F; }
 QLabel#CountBadge { color: #C6C7FF; background: #24265E; border: 1px solid #4647AE; border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700; }
 QLabel#StatusLabel { color: #AACCD6; background: #102542; border-radius: 11px; padding: 5px 11px; font-weight: 700; }
 QLabel#StatusLabel[running="true"] { color: #EAF4F8; background: #112E81; }
+QLabel#BluetoothStatus { color: #AACCD6; background: #102542; border: 1px solid #1E3D64; border-radius: 9px; padding: 9px 11px; }
+QLabel#BluetoothStatus[state="1"] { color: #BCEED1; background: #123A31; border-color: #286B4E; }
+QLabel#BluetoothStatus[state="2"] { color: #FFC5C5; background: #421F2B; border-color: #8A3B4E; }
 QFrame#Card, QFrame#ActionBar { background: #0D1F3E; border: 1px solid #1E3D64; border-radius: 14px; }
 QFrame#DeviceCard { background: #102442; border: 1px solid #1D3B5D; border-radius: 10px; }
-QFrame#DeviceCard[selected="true"] { background: #112E81; border: 1px solid #6B9FE9; }
-QCheckBox#DeviceCheck { color: #EDF5F8; font-size: 13px; font-weight: 500; spacing: 9px; }
-QCheckBox { color: #C5D9E2; spacing: 8px; }
-QCheckBox::indicator { width: 17px; height: 17px; }
+QFrame#DeviceCard[selected="true"] { background: #102442; border: 2px solid #6B9FE9; }
+QPushButton#DeviceSelector { color: #EDF5F8; background: transparent; border: none; border-radius: 7px; padding: 5px 8px; text-align: left; font-size: 13px; font-weight: 600; }
+QPushButton#DeviceSelector:hover { color: #FFFFFF; background: #173662; }
+QPushButton#DeviceSelector:checked { color: #FFFFFF; background: transparent; }
+QPushButton#DeviceSelector:disabled { color: #EDF5F8; background: transparent; border: none; }
+QPushButton#OptionButton { color: #C5D9E2; background: #102542; border: 1px solid #1E3D64; border-radius: 9px; padding: 0 10px; }
+QPushButton#OptionButton:hover { color: #FFFFFF; background: #173662; border-color: #4382DF; }
+QPushButton#OptionButton:checked { color: #FFFFFF; background: #4647AE; border-color: #7778DE; }
+QPushButton#OptionButton:checked:disabled { color: #FFFFFF; background: #35368B; border-color: #5556B2; }
 QComboBox, QSpinBox { color: #EAF4F8; background: #091A38; border: 1px solid #315377; border-radius: 8px; padding: 6px 34px 6px 12px; selection-background-color: #4382DF; }
 QComboBox:hover, QSpinBox:hover { border-color: #5D95E6; }
 QComboBox:focus, QSpinBox:focus { border: 1px solid #4382DF; }
@@ -1399,9 +1984,15 @@ QPushButton#PrimaryButton { color: #FFFFFF; background: #4382DF; border: 1px sol
 QPushButton#PrimaryButton:hover { background: #5B93E5; border-color: #5B93E5; }
 QPushButton#PrimaryButton:pressed { background: #4647AE; border-color: #4647AE; }
 QPushButton#PrimaryButton[running="true"] { background: #4647AE; border-color: #6C6DD0; }
-QPushButton#SecondaryButton, QToolButton#ThemeButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; }
-QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover { background: #173662; border-color: #4382DF; }
-QToolButton#ThemeButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QPushButton#ActionUtilityButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; border-radius: 10px; }
+QPushButton#ActionUtilityButton:hover { background: #173662; border-color: #4382DF; }
+QPushButton#ActionUtilityButton:pressed { background: #1C3E70; border-color: #5D95E6; }
+QPushButton#ActionUtilityButton:checked { color: #FFFFFF; background: #4647AE; border-color: #7778DE; }
+QPushButton#SecondaryButton, QToolButton#ThemeButton, QToolButton#BluetoothButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; }
+QPushButton#SecondaryButton:hover, QToolButton#ThemeButton:hover, QToolButton#BluetoothButton:hover { background: #173662; border-color: #4382DF; }
+QToolButton#ThemeButton, QToolButton#BluetoothButton { border-radius: 10px; padding: 0; font-size: 18px; }
+QToolButton#BluetoothButton[connectionState="1"] { background: #4647AE; border-color: #7778DE; }
+QToolButton#BluetoothButton[connectionState="2"] { border-color: #E05252; }
 QToolButton#PhoneButton { color: #DCEAF2; background: #10284E; border: 1px solid #315377; border-radius: 10px; padding: 0 10px; font-weight: 500; }
 QToolButton#PhoneButton:hover { background: #173662; border-color: #4382DF; }
 QToolButton#PhoneButton:checked { color: #FFFFFF; background: #4647AE; border-color: #7778DE; }
@@ -1414,6 +2005,10 @@ QSlider::groove:horizontal { height: 7px; background: #27415F; border-radius: 4p
 QSlider::sub-page:horizontal { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4647AE, stop:1 #4382DF); border-radius: 4px; }
 QSlider::handle:horizontal { image: url(:/controls/slider_handle_dark.svg); width: 20px; height: 20px; margin: -7px 0; background: transparent; border: none; }
 QTextEdit#LogView { color: #C7DAE4; background: #091A38; border: 1px solid #1E3D64; border-radius: 9px; padding: 7px; font-size: 11px; }
+QListWidget#BluetoothDeviceList { color: #EAF4F8; background: #091A38; border: 1px solid #1E3D64; border-radius: 10px; outline: none; padding: 5px; }
+QListWidget#BluetoothDeviceList::item { min-height: 38px; border-radius: 7px; padding: 4px 9px; }
+QListWidget#BluetoothDeviceList::item:hover { background: #10284E; }
+QListWidget#BluetoothDeviceList::item:selected { color: #FFFFFF; background: #243F86; border: 1px solid #4382DF; }
 QLabel#QrCodeSurface { background: #FFFFFF; border: 1px solid #315377; border-radius: 14px; }
 QLabel#PairingCode { color: #DCEAF2; background: #102A50; border-radius: 9px; padding: 8px; }
 QScrollArea#OutputScroll, QScrollArea#ContentScroll { background: transparent; border: none; }
@@ -1427,4 +2022,5 @@ QToolTip { color: #EAF4F8; background: #10284E; border: 1px solid #4382DF; paddi
 
     setStyleSheet(QString::fromUtf8(darkTheme_ ? darkStyle : lightStyle));
     updatePhoneButtonAppearance();
+    updateBluetoothButtonAppearance();
 }

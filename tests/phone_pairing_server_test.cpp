@@ -49,6 +49,16 @@ QByteArray makePcmPacket(std::uint64_t firstFrame,
     }
     return packet;
 }
+
+QByteArray makeMicrophoneStatePacket(bool enabled)
+{
+    QByteArray packet(6, Qt::Uninitialized);
+    auto* data = reinterpret_cast<uchar*>(packet.data());
+    qToBigEndian<quint32>(2, data);
+    data[4] = 2;
+    data[5] = enabled ? 1 : 0;
+    return packet;
+}
 }
 
 int main(int argc, char* argv[])
@@ -139,6 +149,30 @@ int main(int argc, char* argv[])
         std::cerr << "Authenticated handshake was rejected\n";
         return 1;
     }
+    if (server.remoteBuffer()->isConnected() || server.microphoneStreaming()) {
+        std::cerr << "Pairing unexpectedly activated the phone microphone\n";
+        return 1;
+    }
+
+    if (!server.setMicrophoneEnabled(true)
+        || !waitFor([&] { return client.canReadLine(); }, 1500)) {
+        std::cerr << "Desktop microphone-enable command timed out\n";
+        return 1;
+    }
+    const QJsonObject enableCommand = QJsonDocument::fromJson(client.readLine()).object();
+    if (enableCommand.value(QStringLiteral("type")).toString()
+            != QStringLiteral("setMicrophone")
+        || !enableCommand.value(QStringLiteral("enabled")).toBool()) {
+        std::cerr << "Desktop microphone-enable command was invalid\n";
+        return 1;
+    }
+    client.write(makeMicrophoneStatePacket(true));
+    client.flush();
+    if (!waitFor([&] { return server.microphoneStreaming(); }, 1500)
+        || !server.remoteBuffer()->isConnected()) {
+        std::cerr << "Phone microphone active state was not applied\n";
+        return 1;
+    }
 
     constexpr std::uint64_t firstFrame = 123456;
     const std::vector<std::int16_t> samples{0, 16384, -16384, 32767, -32768};
@@ -158,6 +192,24 @@ int main(int argc, char* argv[])
         || std::abs(snapshot.samples[1] - 0.5F) > 0.0001F
         || std::abs(snapshot.samples[2] + 0.5F) > 0.0001F) {
         std::cerr << "PCM frame was decoded incorrectly\n";
+        return 1;
+    }
+
+    if (!server.setMicrophoneEnabled(false)
+        || !waitFor([&] { return client.canReadLine(); }, 1500)) {
+        std::cerr << "Desktop microphone-disable command timed out\n";
+        return 1;
+    }
+    const QJsonObject disableCommand = QJsonDocument::fromJson(client.readLine()).object();
+    if (disableCommand.value(QStringLiteral("enabled")).toBool(true)) {
+        std::cerr << "Desktop microphone-disable command was invalid\n";
+        return 1;
+    }
+    client.write(makeMicrophoneStatePacket(false));
+    client.flush();
+    if (!waitFor([&] { return !server.microphoneStreaming(); }, 1500)
+        || server.remoteBuffer()->isConnected()) {
+        std::cerr << "Phone microphone was not released\n";
         return 1;
     }
 

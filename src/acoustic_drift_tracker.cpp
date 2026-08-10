@@ -28,6 +28,11 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
+constexpr double maximumRemoteMeasuredLatencySeconds = 1.5;
+constexpr double maximumLocalMeasuredLatencySeconds = 1.5;
+constexpr double minimumAcceptedRelativeLatencySeconds = -0.020;
+constexpr double minimumProbeConfidence = 0.08;
+
 struct CoTaskMemWaveFormatDeleter
 {
     void operator()(WAVEFORMATEX* value) const
@@ -149,6 +154,7 @@ struct TrackerState
     double smoothedDriftPpm = 0.0;
     double previousRelativeLatency = 0.0;
     bool hasPreviousRelativeLatency = false;
+    bool hasInitialAlignment = false;
 };
 
 struct Measurement
@@ -214,7 +220,18 @@ void AcousticDriftTracker::run()
         ComPtr<IAudioCaptureClient> captureClient;
         UniqueHandle captureEvent;
         CaptureFormat captureFormat;
-        const bool useRemoteMicrophone = remoteMicrophone_ != nullptr
+        const bool remoteMicrophoneRequested = remoteMicrophone_ != nullptr;
+        if (remoteMicrophoneRequested && !remoteMicrophone_->isConnected()) {
+            if (statusCallback_) {
+                statusCallback_(QStringLiteral("自同步等待手机麦克风数据"));
+            }
+            while (!stopRequested_ && !remoteMicrophone_->isConnected()) {
+                if (waitInterruptibly(std::chrono::milliseconds(100))) {
+                    return;
+                }
+            }
+        }
+        const bool useRemoteMicrophone = remoteMicrophoneRequested
                                          && remoteMicrophone_->isConnected();
         if (useRemoteMicrophone) {
             captureFormat.sampleRate = remoteMicrophone_->sampleRate();
@@ -307,6 +324,15 @@ void AcousticDriftTracker::run()
                                                       &devicePosition,
                                                       &qpcPosition),
                              "读取连续声学麦克风数据");
+                if (recording != nullptr
+                    && (qpcPosition == 0
+                        || (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0)) {
+                    checkHresult(captureClient->ReleaseBuffer(frameCount),
+                                 "释放无效时间戳的连续声学麦克风数据");
+                    checkHresult(captureClient->GetNextPacketSize(&packetFrames),
+                                 "读取后续连续声学麦克风包");
+                    continue;
+                }
                 if (recording != nullptr) {
                     if (firstQpc != nullptr && *firstQpc == 0) {
                         *firstQpc = qpcPosition;
@@ -429,8 +455,8 @@ void AcousticDriftTracker::run()
                     referenceProbe,
                     0.0,
                     0.0,
-                    availableSeconds,
-                    0.035,
+                    std::min(availableSeconds, maximumRemoteMeasuredLatencySeconds),
+                    minimumProbeConfidence,
                     mode == ProbeMode::ultrasonic
                         ? std::max(18000.0,
                                    std::min(19800.0,
@@ -439,18 +465,26 @@ void AcousticDriftTracker::run()
                     mode == ProbeMode::ultrasonic
                         ? std::min(22500.0, snapshot.sampleRate * 0.5 - 100.0)
                         : std::min(15800.0, snapshot.sampleRate * 0.34) + 2300.0);
-                if (!detection.detected) {
+                if (!detection.detected
+                    || detection.relativeDelaySeconds < minimumAcceptedRelativeLatencySeconds
+                    || detection.relativeDelaySeconds > maximumRemoteMeasuredLatencySeconds) {
                     result.confidence = detection.confidence;
                     return result;
                 }
                 const double arrivalFrame = snapshot.firstFrameIndex
                                             + detection.arrivalSeconds
                                                   * snapshot.sampleRate;
+                // 手机帧号从本次录音的 0 开始，不能直接与 Windows QPC 相减。
+                // 使用探针开始后经过的手机采样帧数；网络延迟作为公共偏移保留，
+                // 在比较多个输出设备时可以抵消。
+                if (arrivalFrame < static_cast<double>(frameAtProbeStart)) {
+                    result.confidence = detection.confidence;
+                    return result;
+                }
                 result.detected = true;
-                // 两个独立时钟的原点是公共常数；设备间作差后它会消失。
-                result.latencyMilliseconds = arrivalFrame * 1000.0
-                                                 / snapshot.sampleRate
-                                             - probeStartQpc / 10000.0;
+                result.latencyMilliseconds = (arrivalFrame
+                                              - static_cast<double>(frameAtProbeStart))
+                                             * 1000.0 / snapshot.sampleRate;
                 result.confidence = detection.confidence;
                 return result;
             }
@@ -481,8 +515,9 @@ void AcousticDriftTracker::run()
                 referenceProbe,
                 expectedStartSeconds,
                 0.08,
-                captureSeconds + 0.08,
-                0.035,
+                std::min(captureSeconds + 0.08,
+                         maximumLocalMeasuredLatencySeconds),
+                minimumProbeConfidence,
                 mode == ProbeMode::ultrasonic
                     ? std::max(18000.0,
                                std::min(19800.0,
@@ -493,7 +528,10 @@ void AcousticDriftTracker::run()
                                captureFormat.sampleRate * 0.5 - 100.0)
                     : std::min(15800.0, captureFormat.sampleRate * 0.34) + 2300.0);
             result.detected = detection.detected
-                              && detection.relativeDelaySeconds >= -0.02;
+                              && detection.relativeDelaySeconds
+                                     >= minimumAcceptedRelativeLatencySeconds
+                              && detection.relativeDelaySeconds
+                                     <= maximumLocalMeasuredLatencySeconds;
             result.latencyMilliseconds = detection.relativeDelaySeconds * 1000.0;
             result.confidence = detection.confidence;
             return result;
@@ -503,7 +541,6 @@ void AcousticDriftTracker::run()
             return;
         }
 
-        int cycle = 0;
         auto previousCycleTime = std::chrono::steady_clock::now();
         while (!stopRequested_) {
             for (TrackerState& state : states) {
@@ -582,7 +619,7 @@ void AcousticDriftTracker::run()
             std::vector<TrackerState*> validStates;
             for (TrackerState& state : states) {
                 if (state.measuredThisCycle
-                    && state.underlyingLatencyHistory.size() >= 2) {
+                    && state.underlyingLatencyHistory.size() >= 3) {
                     validStates.push_back(&state);
                 }
             }
@@ -624,16 +661,41 @@ void AcousticDriftTracker::run()
 
                 const double referenceUnderlying = median(
                     validStates.front()->underlyingLatencyHistory);
+                bool establishedInitialAlignment = false;
                 for (std::size_t index = 0; index < validStates.size(); ++index) {
                     TrackerState& state = *validStates[index];
                     const int currentDelay = state.output.worker
                                                  ->acousticDelayMilliseconds();
-                    const double error = desiredDelays[index] - currentDelay;
-                    int step = 0;
-                    if (std::abs(error) >= 0.75) {
-                        step = std::clamp(static_cast<int>(std::lround(error)), -2, 2);
+                    int newDelay = currentDelay;
+                    if (!state.hasInitialAlignment) {
+                        // 初始测量也必须限速，避免一次误检直接跳到数百毫秒。
+                        const int desired = std::clamp(
+                            static_cast<int>(std::lround(desiredDelays[index])),
+                            0,
+                            500);
+                        const int error = desired - currentDelay;
+                        constexpr int initialStepMilliseconds = 20;
+                        if (std::abs(error) <= initialStepMilliseconds) {
+                            newDelay = desired;
+                            state.hasInitialAlignment = true;
+                            establishedInitialAlignment = true;
+                        } else {
+                            newDelay = std::clamp(
+                                currentDelay
+                                    + (error > 0 ? initialStepMilliseconds
+                                                 : -initialStepMilliseconds),
+                                0,
+                                500);
+                        }
+                    } else {
+                        const double error = desiredDelays[index] - currentDelay;
+                        int step = 0;
+                        if (std::abs(error) >= 0.75) {
+                            step = std::clamp(
+                                static_cast<int>(std::lround(error)), -2, 2);
+                        }
+                        newDelay = std::clamp(currentDelay + step, 0, 500);
                     }
-                    const int newDelay = std::clamp(currentDelay + step, 0, 500);
                     state.output.worker->setAcousticDelayMilliseconds(newDelay);
 
                     const double relativeUnderlying = median(
@@ -653,16 +715,23 @@ void AcousticDriftTracker::run()
                                             newDelay,
                                             state.smoothedDriftPpm,
                                             modeName(state.mode),
-                                            state.lastConfidence);
+                                             state.lastConfidence);
                     }
+                }
+                if (establishedInitialAlignment && statusCallback_) {
+                    statusCallback_(QStringLiteral("自同步已根据三轮有效探针建立初始延迟基准；后续将小步跟踪设备漂移"));
                 }
             } else if (statusCallback_) {
                 statusCallback_(QStringLiteral("声学跟踪等待有效探针：静音或节目电平过低时所有探针都会暂停"));
             }
 
-            ++cycle;
-            const auto interval = cycle < 2 ? std::chrono::seconds(2)
-                                            : std::chrono::seconds(12);
+            const bool waitingForInitialAlignment = std::any_of(
+                states.cbegin(), states.cend(), [](const TrackerState& state) {
+                    return !state.hasInitialAlignment;
+                });
+            const auto interval = waitingForInitialAlignment
+                                      ? std::chrono::seconds(2)
+                                      : std::chrono::seconds(12);
             if (waitInterruptibly(interval)) {
                 break;
             }

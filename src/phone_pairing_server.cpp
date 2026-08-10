@@ -88,7 +88,7 @@ void PhonePairingServer::stop()
     }
     authenticated_ = false;
     phoneName_.clear();
-    remoteBuffer_->setConnected(false);
+    updateMicrophoneStreaming(false);
     tcpServer_->close();
     discoverySocket_->close();
 }
@@ -100,6 +100,30 @@ void PhonePairingServer::disconnectPhone()
     }
     emit statusChanged(QStringLiteral("正在主动断开手机：%1").arg(phoneName_));
     client_->disconnectFromHost();
+}
+
+bool PhonePairingServer::setMicrophoneEnabled(bool enabled)
+{
+    if (client_ == nullptr || !authenticated_) {
+        emit statusChanged(QStringLiteral("手机尚未连接，无法切换麦克风。"));
+        return false;
+    }
+
+    QJsonObject command;
+    command.insert(QStringLiteral("type"), QStringLiteral("setMicrophone"));
+    command.insert(QStringLiteral("enabled"), enabled);
+    const qint64 written = client_->write(
+        QJsonDocument(command).toJson(QJsonDocument::Compact) + '\n');
+    client_->flush();
+    if (written < 0) {
+        emit statusChanged(QStringLiteral("向手机发送麦克风控制命令失败：%1")
+                               .arg(client_->errorString()));
+        return false;
+    }
+    emit statusChanged(enabled
+                           ? QStringLiteral("已请求手机启用麦克风。")
+                           : QStringLiteral("已请求手机停止并释放麦克风。"));
+    return true;
 }
 
 void PhonePairingServer::resetPairing()
@@ -233,6 +257,11 @@ bool PhonePairingServer::phoneConnected() const
     return authenticated_ && client_ != nullptr;
 }
 
+bool PhonePairingServer::microphoneStreaming() const
+{
+    return microphoneStreaming_;
+}
+
 QString PhonePairingServer::connectedPhoneName() const
 {
     return phoneName_;
@@ -297,9 +326,9 @@ void PhonePairingServer::clientDisconnected()
     authenticated_ = false;
     phoneName_.clear();
     receiveBuffer_.clear();
-    remoteBuffer_->setConnected(false);
+    updateMicrophoneStreaming(false);
     emit connectionChanged(false, previousName);
-    emit statusChanged(QStringLiteral("手机麦克风已断开"));
+    emit statusChanged(QStringLiteral("手机连接已断开"));
 }
 
 void PhonePairingServer::readDiscoveryDatagrams()
@@ -374,10 +403,11 @@ bool PhonePairingServer::processHandshakeLine(const QByteArray& line)
         phoneName_ = QStringLiteral("Android 手机");
     }
     authenticated_ = true;
-    remoteBuffer_->setConnected(true, 48000);
-    client_->write("{\"type\":\"accepted\",\"protocol\":1,\"sampleRate\":48000}\n");
+    updateMicrophoneStreaming(false);
+    client_->write("{\"type\":\"accepted\",\"protocol\":1,\"sampleRate\":48000,\"microphoneEnabled\":false}\n");
     emit connectionChanged(true, phoneName_);
-    emit statusChanged(QStringLiteral("手机麦克风已连接：%1").arg(phoneName_));
+    emit statusChanged(QStringLiteral("手机已连接：%1；麦克风保持关闭")
+                           .arg(phoneName_));
     return true;
 }
 
@@ -386,8 +416,8 @@ void PhonePairingServer::processFrames()
     while (authenticated_ && receiveBuffer_.size() >= 4) {
         const auto* raw = reinterpret_cast<const uchar*>(receiveBuffer_.constData());
         const quint32 bodyLength = qFromBigEndian<quint32>(raw);
-        if (bodyLength < 13 || bodyLength > maximumFrameBytes) {
-            rejectClient(QStringLiteral("手机音频帧长度无效"));
+        if (bodyLength < 1 || bodyLength > maximumFrameBytes) {
+            rejectClient(QStringLiteral("手机数据帧长度无效"));
             return;
         }
         if (receiveBuffer_.size() < static_cast<int>(4 + bodyLength)) {
@@ -395,7 +425,24 @@ void PhonePairingServer::processFrames()
         }
         const QByteArray body = receiveBuffer_.mid(4, static_cast<int>(bodyLength));
         receiveBuffer_.remove(0, static_cast<int>(4 + bodyLength));
-        if (static_cast<quint8>(body.at(0)) != 1) {
+        const quint8 frameType = static_cast<quint8>(body.at(0));
+        if (frameType == 2) {
+            if (body.size() >= 2) {
+                updateMicrophoneStreaming(body.at(1) != 0);
+            }
+            continue;
+        }
+        if (frameType == 3) {
+            const QString message = QString::fromUtf8(body.constData() + 1,
+                                                      body.size() - 1);
+            emit statusChanged(QStringLiteral("手机麦克风：%1").arg(message));
+            updateMicrophoneStreaming(false);
+            continue;
+        }
+        if (frameType != 1 || body.size() < 13) {
+            continue;
+        }
+        if (!microphoneStreaming_) {
             continue;
         }
         const auto* bodyRaw = reinterpret_cast<const uchar*>(body.constData());
@@ -423,6 +470,26 @@ void PhonePairingServer::processFrames()
                                         ? 20.0 * std::log10(rms)
                                         : -120.0);
     }
+}
+
+void PhonePairingServer::updateMicrophoneStreaming(bool enabled)
+{
+    if (microphoneStreaming_ == enabled) {
+        if (!enabled) {
+            remoteBuffer_->setConnected(false);
+        }
+        return;
+    }
+
+    microphoneStreaming_ = enabled;
+    remoteBuffer_->setConnected(enabled, enabled ? 48000 : 0);
+    if (!enabled) {
+        emit microphoneLevelChanged(-160.0);
+    }
+    emit microphoneStreamingChanged(enabled);
+    emit statusChanged(enabled
+                           ? QStringLiteral("手机麦克风已启用并开始回传。")
+                           : QStringLiteral("手机麦克风已停止并释放。"));
 }
 
 void PhonePairingServer::rejectClient(const QString& reason)

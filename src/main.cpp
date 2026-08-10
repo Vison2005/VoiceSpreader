@@ -7,6 +7,7 @@
 #include <QIcon>
 #include <QMetaObject>
 #include <QStyleFactory>
+#include <QSystemTrayIcon>
 #include <QTimer>
 
 namespace
@@ -41,6 +42,7 @@ int main(int argc, char* argv[])
 #endif
 
     QApplication application(argc, argv);
+    application.setQuitOnLastWindowClosed(false);
     QApplication::setApplicationName(QStringLiteral("VoiceSpreader"));
     QApplication::setOrganizationName(QStringLiteral("VoiceSpreader"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
@@ -62,13 +64,19 @@ int main(int argc, char* argv[])
     application.setWindowIcon(QIcon(QStringLiteral(":/assets/app.png")));
 
     QString previewPath;
+    QString bluetoothPreviewPath;
     bool previewDark = false;
     bool previewPhoneConnected = false;
+    bool startMinimized = false;
     double previewPhoneLevel = -160.0;
     QSize requestedWindowSize;
     for (const QString& argument : application.arguments()) {
         if (argument.startsWith(QStringLiteral("--render-preview="))) {
             previewPath = argument.mid(QStringLiteral("--render-preview=").size());
+        } else if (argument.startsWith(
+                       QStringLiteral("--render-bluetooth-preview="))) {
+            bluetoothPreviewPath = argument.mid(
+                QStringLiteral("--render-bluetooth-preview=").size());
         } else if (argument.startsWith(QStringLiteral("--render-preview-dark="))) {
             previewDark = true;
             previewPath = argument.mid(QStringLiteral("--render-preview-dark=").size());
@@ -93,6 +101,8 @@ int main(int argc, char* argv[])
                 previewPhoneConnected = true;
                 previewPhoneLevel = level;
             }
+        } else if (argument == QStringLiteral("--start-minimized")) {
+            startMinimized = true;
         }
     }
 
@@ -100,7 +110,12 @@ int main(int argc, char* argv[])
     if (requestedWindowSize.isValid()) {
         window.resize(requestedWindowSize);
     }
-    window.show();
+    const bool previewRequested = !previewPath.isEmpty()
+                                  || !bluetoothPreviewPath.isEmpty();
+    if (!startMinimized || previewRequested
+        || !QSystemTrayIcon::isSystemTrayAvailable()) {
+        window.show();
+    }
 
     if (previewPhoneConnected) {
         QMetaObject::invokeMethod(
@@ -116,7 +131,31 @@ int main(int argc, char* argv[])
             Q_ARG(double, previewPhoneLevel));
     }
 
-    if (!previewPath.isEmpty()) {
+    if (!bluetoothPreviewPath.isEmpty()) {
+        QTimer::singleShot(
+            0,
+            &window,
+            [&application, &window, bluetoothPreviewPath] {
+                QTimer::singleShot(
+                    1600,
+                    &application,
+                    [&application, bluetoothPreviewPath] {
+                        QWidget* modal = QApplication::activeModalWidget();
+                        const bool saved = modal != nullptr
+                                           && modal->grab().save(
+                                               bluetoothPreviewPath);
+                        if (modal != nullptr) {
+                            modal->close();
+                        }
+                        application.exit(saved ? 0 : 2);
+                    });
+                QMetaObject::invokeMethod(&window,
+                                          "showBluetoothAudioReceiver",
+                                          Qt::DirectConnection);
+            });
+    }
+
+    if (!previewPath.isEmpty() && bluetoothPreviewPath.isEmpty()) {
         if (previewDark) {
             QMetaObject::invokeMethod(&window, "toggleTheme", Qt::DirectConnection);
         }

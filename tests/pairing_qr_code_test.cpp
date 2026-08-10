@@ -1,13 +1,15 @@
 #include "../src/pairing_qr_code.h"
 
+#include <QCoreApplication>
 #include <QImage>
 #include <QString>
 
 #include <fstream>
 #include <iostream>
 
-int main()
+int main(int argc, char* argv[])
 {
+    QCoreApplication application(argc, argv);
     const QString payload = QStringLiteral(
         "VSP1:192.168.100.200:65535:0123456789ABCDEF0123456789ABCDEF:"
         "FEDCBA9876543210FEDCBA9876543210");

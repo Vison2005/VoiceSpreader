@@ -88,6 +88,14 @@ std::size_t FrameRingBuffer::skip(std::size_t frameCount)
     return framesToSkip;
 }
 
+void FrameRingBuffer::clear()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    readFrame_ = 0;
+    writeFrame_ = 0;
+    availableFrames_ = 0;
+}
+
 std::size_t FrameRingBuffer::availableFrames() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

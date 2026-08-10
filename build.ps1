@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$QtRoot = 'D:\Anaconda\Library',
     [string]$PackageDir = 'dist\VoiceSpreader'
@@ -80,6 +80,16 @@ Copy-Item -LiteralPath $builtExe -Destination $packagedExe -Force
 & $deployTool --release --force --compiler-runtime --no-translations --no-system-d3d-compiler --dir $packageDir $packagedExe
 if ($LASTEXITCODE -ne 0) {
     throw "windeployqt failed with exit code: $LASTEXITCODE"
+}
+
+# conda 构建的 Qt 把 zlib/zstd/openssl/libpng 等作为独立 DLL，windeployqt 不会自动带上；
+# 缺失时目标机器启动会报“找不到 xxx.dll”。用 dumpbin 递归补全所有第三方依赖。
+& (Join-Path $projectDir 'scripts\copy_conda_deps.ps1') -PackageDir $packageDir -CondaBins @(
+    (Join-Path $QtRoot 'bin'),
+    $QtRoot
+)
+if ($LASTEXITCODE -ne 0) {
+    throw "copy_conda_deps.ps1 failed with exit code: $LASTEXITCODE"
 }
 
 Copy-Item -LiteralPath (Join-Path $projectDir 'README.md') -Destination (Join-Path $packageDir 'README.md') -Force

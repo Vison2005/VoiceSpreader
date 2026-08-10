@@ -31,6 +31,8 @@ set(VOICESPREADER_SOURCES
     src/remote_microphone_buffer.h
     src/phone_pairing_server.cpp
     src/phone_pairing_server.h
+    src/bluetooth_audio_receiver.cpp
+    src/bluetooth_audio_receiver.h
     src/pairing_qr_code.cpp
     src/pairing_qr_code.h
     src/output_worker.cpp
@@ -65,6 +67,7 @@ target_link_libraries(VoiceSpreader PRIVATE
     ole32
     propsys
     avrt
+    windowsapp
 )
 
 install(TARGETS VoiceSpreader RUNTIME DESTINATION .)

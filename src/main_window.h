@@ -2,6 +2,7 @@
 
 #include "audio_device.h"
 #include "audio_engine.h"
+#include "bluetooth_audio_receiver.h"
 #include "latency_calibrator.h"
 #include "phone_pairing_server.h"
 
@@ -12,7 +13,7 @@
 
 class LevelMeterWidget;
 class QBoxLayout;
-class QCheckBox;
+class QCloseEvent;
 class QComboBox;
 class QLabel;
 class QPushButton;
@@ -20,6 +21,7 @@ class QSlider;
 class QSpinBox;
 class QTextEdit;
 class QToolButton;
+class QSystemTrayIcon;
 class QVBoxLayout;
 class QResizeEvent;
 class QWidget;
@@ -33,6 +35,7 @@ public:
     ~MainWindow() override;
 
 protected:
+    void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private slots:
@@ -56,8 +59,14 @@ private slots:
                                   double confidence);
     void updateProgramLevel(double levelDbfs, bool probeAllowed);
     void showPhonePairing();
+    void showBluetoothAudioReceiver();
     void updatePhoneConnection(bool connected, const QString& phoneName);
+    void updatePhoneMicrophoneStreaming(bool enabled);
     void updatePhoneMicrophoneLevel(double levelDbfs);
+    void updateBluetoothConnection(bool connected, const QString& deviceName);
+    void minimizeToTray();
+    void restoreFromTray();
+    void setAutoStartEnabled(bool enabled);
 
 private:
     AudioDevice currentCaptureDevice() const;
@@ -66,11 +75,16 @@ private:
     void setControlsEnabled(bool enabled);
     void applyTheme();
     void updatePhoneButtonAppearance();
+    void updateBluetoothButtonAppearance();
+    void initializeSystemTray();
+    void updateAutoStartButtonAppearance();
+    bool isAutoStartEnabled() const;
     void updateResponsiveLayout();
 
     AudioEngine engine_;
     LatencyCalibrator calibrator_;
     PhonePairingServer phonePairingServer_;
+    BluetoothAudioReceiver bluetoothAudioReceiver_;
     QVector<AudioDevice> devices_;
     QVector<AudioDevice> microphoneDevices_;
 
@@ -79,17 +93,20 @@ private:
     QVBoxLayout* outputCardsLayout_ = nullptr;
     QSlider* bufferSlider_ = nullptr;
     QSpinBox* bufferSpin_ = nullptr;
-    QCheckBox* automaticLatencyCheck_ = nullptr;
-    QCheckBox* continuousAcousticCheck_ = nullptr;
-    QCheckBox* exclusiveModeCheck_ = nullptr;
+    QPushButton* automaticLatencyCheck_ = nullptr;
+    QPushButton* continuousAcousticCheck_ = nullptr;
+    QPushButton* exclusiveModeCheck_ = nullptr;
     QLabel* selectionLabel_ = nullptr;
     QLabel* stateLabel_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QPushButton* refreshButton_ = nullptr;
     QPushButton* calibrateButton_ = nullptr;
     QPushButton* startButton_ = nullptr;
+    QPushButton* minimizeToTrayButton_ = nullptr;
+    QPushButton* autoStartButton_ = nullptr;
     QToolButton* themeButton_ = nullptr;
     QToolButton* phoneMicrophoneButton_ = nullptr;
+    QToolButton* bluetoothButton_ = nullptr;
     LevelMeterWidget* phoneLevelMeter_ = nullptr;
     QTextEdit* logView_ = nullptr;
     QLabel* calibrationHintLabel_ = nullptr;
@@ -98,8 +115,9 @@ private:
     QBoxLayout* sourceControlsLayout_ = nullptr;
     QBoxLayout* calibrationControlsLayout_ = nullptr;
     QWidget* rightColumn_ = nullptr;
+    QSystemTrayIcon* trayIcon_ = nullptr;
 
-    QHash<QString, QCheckBox*> outputChecks_;
+    QHash<QString, QPushButton*> outputChecks_;
     QHash<QString, QSlider*> volumeSliders_;
     QHash<QString, QLabel*> volumeLabels_;
     QHash<QString, QSpinBox*> delaySpinBoxes_;
@@ -108,6 +126,12 @@ private:
     QString connectedPhoneName_;
     double phoneMicrophoneLevelDbfs_ = -160.0;
     int phoneConnectionState_ = 0;
+    bool phoneMicrophoneActive_ = false;
+    QString connectedBluetoothDeviceName_;
+    int bluetoothConnectionState_ = 0;
+    bool bluetoothBusy_ = false;
     bool darkTheme_ = false;
     bool compactLayout_ = false;
+    bool quitting_ = false;
+    bool trayMessageShown_ = false;
 };

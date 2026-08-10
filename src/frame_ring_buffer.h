@@ -15,6 +15,7 @@ public:
     void write(const BYTE* data, std::size_t frameCount, bool silent);
     std::size_t read(BYTE* destination, std::size_t frameCount);
     std::size_t skip(std::size_t frameCount);
+    void clear();
     std::size_t availableFrames() const;
     std::uint64_t overflowFrames() const;
 

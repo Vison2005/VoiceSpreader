@@ -25,6 +25,7 @@ public:
     bool start(QString* errorMessage = nullptr);
     void stop();
     void disconnectPhone();
+    bool setMicrophoneEnabled(bool enabled);
     void resetPairing();
 
     QString pairingCode() const;
@@ -35,12 +36,14 @@ public:
     quint16 serverPort() const;
     quint16 discoveryPort() const;
     bool phoneConnected() const;
+    bool microphoneStreaming() const;
     QString connectedPhoneName() const;
     std::shared_ptr<RemoteMicrophoneBuffer> remoteBuffer() const;
 
 signals:
     void statusChanged(const QString& message);
     void connectionChanged(bool connected, const QString& phoneName);
+    void microphoneStreamingChanged(bool enabled);
     void microphoneLevelChanged(double levelDbfs);
 
 private slots:
@@ -54,6 +57,7 @@ private:
     QString chooseLocalIpv4Address() const;
     bool processHandshakeLine(const QByteArray& line);
     void processFrames();
+    void updateMicrophoneStreaming(bool enabled);
     void rejectClient(const QString& reason);
 
     QTcpServer* tcpServer_ = nullptr;
@@ -61,6 +65,7 @@ private:
     QTcpSocket* client_ = nullptr;
     QByteArray receiveBuffer_;
     bool authenticated_ = false;
+    bool microphoneStreaming_ = false;
     QString sessionId_;
     QString sessionSecret_;
     QString pairingCode_;

@@ -306,13 +306,25 @@ void AudioEngine::run(AudioDevice captureSource,
             throw std::runtime_error("没有输出设备成功启动");
         }
 
-        if (automaticLatencyCompensation) {
-            double maximumStreamLatencyMilliseconds = 0.0;
+        // 声学自同步会直接测量扬声器到麦克风的总路径；同时叠加静态
+        // GetStreamLatency 补偿会把同一段差异重复加入，先让两种控制器互斥。
+        if (automaticLatencyCompensation && !continuousAcousticTracking) {
+            double maximumEffectiveLatencyMilliseconds = 0.0;
+            QHash<QString, double> effectiveLatencies;
+            QHash<QString, int> manualDelays;
+            {
+                std::lock_guard<std::mutex> lock(activeWorkersMutex_);
+                manualDelays = requestedOutputDelays_;
+            }
             for (const auto& worker : outputWorkers) {
                 if (worker->initializedSuccessfully()) {
-                    maximumStreamLatencyMilliseconds = std::max(
-                        maximumStreamLatencyMilliseconds,
-                        worker->streamLatencyMilliseconds());
+                    const QString deviceId = worker->device().id;
+                    const double effectiveLatency = worker->streamLatencyMilliseconds()
+                                                    + manualDelays.value(deviceId);
+                    effectiveLatencies.insert(deviceId, effectiveLatency);
+                    maximumEffectiveLatencyMilliseconds = std::max(
+                        maximumEffectiveLatencyMilliseconds,
+                        effectiveLatency);
                 }
             }
 
@@ -321,10 +333,12 @@ void AudioEngine::run(AudioDevice captureSource,
                 if (!worker->initializedSuccessfully()) {
                     continue;
                 }
+                const double effectiveLatency = effectiveLatencies.value(
+                    worker->device().id,
+                    worker->streamLatencyMilliseconds());
                 const int compensationMilliseconds = static_cast<int>(std::lround(
                     std::max(0.0,
-                             maximumStreamLatencyMilliseconds
-                                 - worker->streamLatencyMilliseconds())));
+                             maximumEffectiveLatencyMilliseconds - effectiveLatency)));
                 worker->setAutomaticDelayMilliseconds(compensationMilliseconds);
                 if (compensationMilliseconds > 0) {
                     emit statusChanged(QStringLiteral("自动补偿：%1 增加 %2 ms，使输出设备彼此对齐")
@@ -332,14 +346,16 @@ void AudioEngine::run(AudioDevice captureSource,
                                            .arg(compensationMilliseconds));
                 }
             }
+        } else if (automaticLatencyCompensation && continuousAcousticTracking) {
+            emit statusChanged(QStringLiteral(
+                "已启用声学自同步，跳过静态流延迟自动补偿，避免重复叠加"));
         }
 
         checkHresult(captureAudioClient->Start(), "启动 WASAPI Loopback");
 
-        const bool remoteMicrophoneReady = remoteMicrophone != nullptr
-                                           && remoteMicrophone->isConnected();
+        const bool remoteMicrophoneRequested = remoteMicrophone != nullptr;
         if (continuousAcousticTracking
-            && (remoteMicrophoneReady || !acousticMicrophone.id.isEmpty())
+            && (remoteMicrophoneRequested || !acousticMicrophone.id.isEmpty())
             && activeOutputCount >= 2) {
             std::vector<AcousticTrackedOutput> trackedOutputs;
             for (int index = 0; index < static_cast<int>(outputWorkers.size()); ++index) {
@@ -373,7 +389,7 @@ void AudioEngine::run(AudioDevice captureSource,
                                                    probeMode,
                                                    confidence);
                 },
-                remoteMicrophoneReady ? remoteMicrophone : nullptr);
+                 remoteMicrophoneRequested ? remoteMicrophone : nullptr);
             acousticTracker->start();
         } else if (continuousAcousticTracking) {
             emit statusChanged(QStringLiteral("连续声学跟踪未启动：需要麦克风和至少两个可用输出"));
