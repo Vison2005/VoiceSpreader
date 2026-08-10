@@ -1,6 +1,7 @@
 #pragma once
 
 #include "audio_device.h"
+#include "audio_clock_model.h"
 #include "frame_ring_buffer.h"
 
 #include <Windows.h>
@@ -62,6 +63,7 @@ public:
     int targetBufferMilliseconds() const;
     int acousticDelayMilliseconds() const;
     std::uint32_t inputSampleRate() const;
+    double clockDriftPpm() const;
     const AudioDevice& device() const { return device_; }
 
 private:
@@ -91,6 +93,9 @@ private:
     std::atomic_int64_t streamLatencyHundredNanoseconds_{0};
     std::atomic_int64_t enginePeriodHundredNanoseconds_{0};
     std::atomic_bool lowLatencyMode_{false};
+    AudioClockModel clockModel_;
+    std::atomic<double> clockDriftPpm_{0.0};
+    std::atomic_bool clockModelReady_{false};
     bool preferExclusiveMode_ = true;
     std::thread thread_;
 

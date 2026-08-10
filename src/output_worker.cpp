@@ -1,5 +1,6 @@
 #include "output_worker.h"
 
+#include "polyphase_resampler.h"
 #include "wasapi_helpers.h"
 
 #include <audioclient.h>
@@ -417,6 +418,11 @@ std::uint32_t OutputWorker::inputSampleRate() const
     return static_cast<std::uint32_t>(sampleRate_);
 }
 
+double OutputWorker::clockDriftPpm() const
+{
+    return clockDriftPpm_.load();
+}
+
 void OutputWorker::run()
 {
     bool initializationReported = false;
@@ -590,6 +596,39 @@ void OutputWorker::run()
                      "提交初始静音缓冲");
 
         checkHresult(audioClient->Start(), "启动输出流");
+        // IAudioClock 提供的是设备自己的帧位置和 QPC 位置，二者拟合后可测出硬件漂移。
+        ComPtr<IAudioClock> audioClock;
+        const bool hasAudioClock = SUCCEEDED(audioClient->GetService(IID_PPV_ARGS(&audioClock)));
+        LARGE_INTEGER qpcFrequency{};
+        const bool hasQpcFrequency = QueryPerformanceFrequency(&qpcFrequency)
+                                     && qpcFrequency.QuadPart > 0;
+        clockModelReady_ = false;
+        clockDriftPpm_ = 0.0;
+        if (hasQpcFrequency) {
+            clockModel_.setQpcTicksPerSecond(static_cast<double>(qpcFrequency.QuadPart));
+        } else {
+            clockModel_.reset();
+        }
+        auto sampleAudioClock = [&]() {
+            if (!hasAudioClock || !hasQpcFrequency) {
+                return;
+            }
+            UINT64 devicePosition = 0;
+            UINT64 qpcPosition = 0;
+            if (FAILED(audioClock->GetPosition(&devicePosition, &qpcPosition))
+                || qpcPosition == 0) {
+                return;
+            }
+            clockModel_.addSample(devicePosition, qpcPosition);
+            if (clockModel_.ready()) {
+                const double ppm = clockModel_.driftPpm(renderFormat.sampleRate);
+                if (std::isfinite(ppm)) {
+                    clockDriftPpm_ = ppm;
+                    clockModelReady_ = true;
+                }
+            }
+        };
+        sampleAudioClock();
         completeInitialization(true);
         initializationReported = true;
         const QString streamMode = exclusiveMode
@@ -607,7 +646,10 @@ void OutputWorker::run()
 
         std::vector<float> conversionBuffer;
         std::vector<BYTE> rawInputBuffer;
+        const PolyphaseResampler resampler(inputFormat.channels);
         double sourcePosition = 0.0;
+        double smoothedClockCorrection = 0.0;
+        bool hasClockCorrection = false;
         std::uint64_t observedOverflowFrames = ringBuffer_->overflowFrames();
         const double nominalRatio = static_cast<double>(inputFormat.sampleRate)
                                     / static_cast<double>(renderFormat.sampleRate);
@@ -619,6 +661,20 @@ void OutputWorker::run()
             }
             if (waitResult != WAIT_OBJECT_0) {
                 checkHresult(HRESULT_FROM_WIN32(GetLastError()), "等待输出事件");
+            }
+
+            sampleAudioClock();
+            const double rawClockCorrection = clockModelReady_.load()
+                                                  ? std::clamp(-clockDriftPpm_.load() * 1.0e-6,
+                                                               -0.0005,
+                                                               0.0005)
+                                                  : 0.0;
+            if (clockModelReady_.load()) {
+                smoothedClockCorrection = hasClockCorrection
+                                               ? smoothedClockCorrection * 0.98
+                                                     + rawClockCorrection * 0.02
+                                               : rawClockCorrection;
+                hasClockCorrection = true;
             }
 
             UINT32 writableFrames = endpointBufferFrames;
@@ -686,14 +742,17 @@ void OutputWorker::run()
                            * correctionTimeSeconds),
                     -correctionLimit,
                     correctionLimit);
-                const double effectiveRatio = nominalRatio * (1.0 + ratioCorrection);
+                // 时钟漂移是前馈修正，缓冲水位仍负责处理启动、暂停和突发调度延迟。
+                const double combinedCorrection = std::clamp(
+                    smoothedClockCorrection + ratioCorrection, -0.05, 0.05);
+                const double effectiveRatio = nominalRatio * (1.0 + combinedCorrection);
 
                 const double finalSourcePosition = sourcePosition
                                                    + static_cast<double>(writableFrames - 1)
                                                          * effectiveRatio;
                 const std::size_t requiredFrames = static_cast<std::size_t>(
                                                        std::floor(finalSourcePosition))
-                                                   + 2;
+                                                   + PolyphaseResampler::kHalfTaps + 1;
                 std::size_t currentConversionFrames = conversionBuffer.size()
                                                       / inputFormat.channels;
                 if (currentConversionFrames < requiredFrames) {
@@ -721,29 +780,38 @@ void OutputWorker::run()
                     const double position = sourcePosition
                                             + static_cast<double>(outputFrame) * effectiveRatio;
                     const std::size_t leftFrame = static_cast<std::size_t>(std::floor(position));
-                    const std::size_t rightFrame = leftFrame + 1;
-                    if (rightFrame >= currentConversionFrames) {
+                    if (leftFrame + PolyphaseResampler::kHalfTaps >= currentConversionFrames) {
                         break;
                     }
-                    const float fraction = static_cast<float>(position - leftFrame);
                     BYTE* outputFrameData = target
                                             + static_cast<std::size_t>(outputFrame)
                                                   * renderFormat.bytesPerFrame;
                     for (WORD channel = 0; channel < renderFormat.channels; ++channel) {
-                        const float left = mappedSample(conversionBuffer,
-                                                        leftFrame,
-                                                        channel,
-                                                        inputFormat,
-                                                        renderFormat);
-                        const float right = mappedSample(conversionBuffer,
-                                                         rightFrame,
-                                                         channel,
-                                                         inputFormat,
-                                                         renderFormat);
+                        float resampledValue = 0.0F;
+                        if (renderFormat.channels == 1 && inputFormat.channels > 1) {
+                            for (WORD inputChannel = 0; inputChannel < inputFormat.channels;
+                                 ++inputChannel) {
+                                resampledValue += resampler.sample(conversionBuffer,
+                                                                   currentConversionFrames,
+                                                                   position,
+                                                                   inputChannel);
+                            }
+                            resampledValue /= static_cast<float>(inputFormat.channels);
+                        } else {
+                            const std::size_t inputChannel = inputFormat.channels == 1
+                                                                 ? 0
+                                                                 : channel;
+                            if (inputChannel < inputFormat.channels) {
+                                resampledValue = resampler.sample(conversionBuffer,
+                                                                  currentConversionFrames,
+                                                                  position,
+                                                                  inputChannel);
+                            }
+                        }
                         const float volumeScale = static_cast<float>(
                                                       requestedVolumePercent_.load())
                                                   / 100.0F;
-                        encodeSample((left + (right - left) * fraction) * volumeScale,
+                        encodeSample(resampledValue * volumeScale,
                                      outputFrameData + channel * outputBytesPerSample,
                                      renderFormat);
                     }
@@ -756,17 +824,24 @@ void OutputWorker::run()
                 sourcePosition += static_cast<double>(producedFrames) * effectiveRatio;
                 std::size_t consumedFrames = static_cast<std::size_t>(std::floor(sourcePosition));
                 currentConversionFrames = conversionBuffer.size() / inputFormat.channels;
-                if (currentConversionFrames > 1) {
-                    consumedFrames = std::min(consumedFrames, currentConversionFrames - 1);
+                if (currentConversionFrames > PolyphaseResampler::kHalfTaps + 1) {
+                    consumedFrames = std::min(
+                        consumedFrames,
+                        currentConversionFrames - PolyphaseResampler::kHalfTaps - 1);
                 } else {
                     consumedFrames = 0;
                 }
-                if (consumedFrames > 0) {
+                // 保留滤波器历史帧，避免每次压缩后 sinc 窗口从零帧重新开始。
+                const std::size_t historyFrames = PolyphaseResampler::kHalfTaps;
+                const std::size_t erasedFrames = consumedFrames > historyFrames
+                                                     ? consumedFrames - historyFrames
+                                                     : 0;
+                if (erasedFrames > 0) {
                     conversionBuffer.erase(conversionBuffer.begin(),
                                            conversionBuffer.begin()
-                                               + static_cast<std::ptrdiff_t>(consumedFrames
+                                               + static_cast<std::ptrdiff_t>(erasedFrames
                                                                             * inputFormat.channels));
-                    sourcePosition -= static_cast<double>(consumedFrames);
+                    sourcePosition -= static_cast<double>(erasedFrames);
                 }
             }
 

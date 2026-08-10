@@ -21,6 +21,10 @@ set(VOICESPREADER_SOURCES
     src/wasapi_device_manager.h
     src/frame_ring_buffer.cpp
     src/frame_ring_buffer.h
+    src/audio_clock_model.cpp
+    src/audio_clock_model.h
+    src/polyphase_resampler.cpp
+    src/polyphase_resampler.h
     src/calibration_signal.cpp
     src/calibration_signal.h
     src/latency_calibrator.cpp
@@ -117,4 +121,24 @@ if(BUILD_TESTING)
     endif()
     target_link_libraries(PhonePairingServerTest PRIVATE Qt5::Network)
     add_test(NAME PhonePairingServerTest COMMAND PhonePairingServerTest)
+
+    add_executable(AudioClockModelTest
+        tests/audio_clock_model_test.cpp
+        src/audio_clock_model.cpp
+        src/audio_clock_model.h
+    )
+    if(MSVC)
+        target_compile_options(AudioClockModelTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME AudioClockModelTest COMMAND AudioClockModelTest)
+
+    add_executable(PolyphaseResamplerTest
+        tests/polyphase_resampler_test.cpp
+        src/polyphase_resampler.cpp
+        src/polyphase_resampler.h
+    )
+    if(MSVC)
+        target_compile_options(PolyphaseResamplerTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME PolyphaseResamplerTest COMMAND PolyphaseResamplerTest)
 endif()
