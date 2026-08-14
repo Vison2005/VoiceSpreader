@@ -59,6 +59,18 @@ QByteArray makeMicrophoneStatePacket(bool enabled)
     data[5] = enabled ? 1 : 0;
     return packet;
 }
+
+QByteArray makeClockPacket(std::uint64_t frameIndex,
+                           std::uint64_t monotonicNanoseconds)
+{
+    QByteArray packet(21, Qt::Uninitialized);
+    auto* data = reinterpret_cast<uchar*>(packet.data());
+    qToBigEndian<quint32>(17, data);
+    data[4] = 4;
+    qToBigEndian<quint64>(frameIndex, data + 5);
+    qToBigEndian<quint64>(monotonicNanoseconds, data + 13);
+    return packet;
+}
 }
 
 int main(int argc, char* argv[])
@@ -185,6 +197,18 @@ int main(int argc, char* argv[])
             },
             1500)) {
         std::cerr << "PCM frame did not reach the remote microphone buffer\n";
+        return 1;
+    }
+    client.write(makeClockPacket(firstFrame, 1'000'000'000ULL));
+    client.write(makeClockPacket(firstFrame + 48'000, 2'000'000'000ULL));
+    client.write(makeClockPacket(firstFrame + 96'000, 3'000'000'000ULL));
+    client.flush();
+    if (!waitFor(
+            [&] {
+                return server.remoteBuffer()->snapshotFrom(firstFrame).sampleRate == 48000;
+            },
+            1500)) {
+        std::cerr << "Remote clock samples were not accepted\n";
         return 1;
     }
     const RemoteAudioSnapshot snapshot = server.remoteBuffer()->snapshotFrom(firstFrame);

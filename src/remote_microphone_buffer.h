@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio_clock_model.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -24,6 +26,7 @@ public:
     void append(std::uint64_t firstFrameIndex,
                 std::uint32_t sampleRate,
                 const std::vector<float>& samples);
+    void addClockSample(std::uint64_t frameIndex, std::uint64_t monotonicNanoseconds);
     std::uint64_t latestFrameIndex() const;
     bool waitUntilFrame(std::uint64_t frameIndex,
                         std::chrono::milliseconds timeout,
@@ -40,4 +43,5 @@ private:
     std::uint64_t nextFrameIndex_ = 0;
     std::uint32_t sampleRate_ = 0;
     bool connected_ = false;
+    AudioClockModel clockModel_{1'000'000'000.0, 32};
 };

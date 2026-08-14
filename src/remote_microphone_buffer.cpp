@@ -1,6 +1,7 @@
 #include "remote_microphone_buffer.h"
 
 #include <algorithm>
+#include <cmath>
 
 void RemoteMicrophoneBuffer::setConnected(bool connected, std::uint32_t sampleRate)
 {
@@ -11,12 +12,25 @@ void RemoteMicrophoneBuffer::setConnected(bool connected, std::uint32_t sampleRa
             samples_.clear();
             firstFrameIndex_ = 0;
             nextFrameIndex_ = 0;
+            clockModel_.reset();
         }
         if (sampleRate != 0) {
             sampleRate_ = sampleRate;
         }
     }
     condition_.notify_all();
+}
+
+void RemoteMicrophoneBuffer::addClockSample(std::uint64_t frameIndex,
+                                             std::uint64_t monotonicNanoseconds)
+{
+    if (monotonicNanoseconds == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (connected_) {
+        clockModel_.addSample(frameIndex, monotonicNanoseconds);
+    }
 }
 
 bool RemoteMicrophoneBuffer::isConnected() const
@@ -101,6 +115,14 @@ RemoteAudioSnapshot RemoteMicrophoneBuffer::snapshotFrom(
     std::lock_guard<std::mutex> lock(mutex_);
     RemoteAudioSnapshot snapshot;
     snapshot.sampleRate = sampleRate_;
+    if (clockModel_.ready()) {
+        const double measuredRate = clockModel_.framesPerSecond();
+        if (std::isfinite(measuredRate)
+            && measuredRate >= static_cast<double>(sampleRate_) * 0.95
+            && measuredRate <= static_cast<double>(sampleRate_) * 1.05) {
+            snapshot.sampleRate = static_cast<std::uint32_t>(std::lround(measuredRate));
+        }
+    }
     snapshot.firstFrameIndex = std::max(firstFrameIndex, firstFrameIndex_);
     if (snapshot.firstFrameIndex >= nextFrameIndex_ || samples_.empty()) {
         return snapshot;

@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <limits>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -12,6 +15,90 @@ constexpr double startFrequencyHz = 600.0;
 constexpr double endFrequencyHz = 5200.0;
 constexpr double fadeDurationSeconds = 0.01;
 constexpr double pi = 3.14159265358979323846;
+
+using Complex = std::complex<double>;
+
+std::size_t nextPowerOfTwo(std::size_t value)
+{
+    std::size_t result = 1;
+    while (result < value) {
+        result <<= 1;
+    }
+    return result;
+}
+
+void fft(std::vector<Complex>& values, bool inverse)
+{
+    if (values.size() < 2) {
+        return;
+    }
+
+    for (std::size_t index = 1, reversed = 0; index < values.size(); ++index) {
+        std::size_t bit = values.size() >> 1;
+        for (; (reversed & bit) != 0; bit >>= 1) {
+            reversed ^= bit;
+        }
+        reversed ^= bit;
+        if (index < reversed) {
+            std::swap(values[index], values[reversed]);
+        }
+    }
+
+    for (std::size_t length = 2; length <= values.size(); length <<= 1) {
+        const double angle = (inverse ? 2.0 : -2.0) * pi
+                             / static_cast<double>(length);
+        const Complex step(std::cos(angle), std::sin(angle));
+        for (std::size_t offset = 0; offset < values.size(); offset += length) {
+            Complex phase(1.0, 0.0);
+            const std::size_t half = length / 2;
+            for (std::size_t index = 0; index < half; ++index) {
+                const Complex even = values[offset + index];
+                const Complex odd = phase * values[offset + index + half];
+                values[offset + index] = even + odd;
+                values[offset + index + half] = even - odd;
+                phase *= step;
+            }
+        }
+    }
+
+    if (inverse) {
+        const double scale = 1.0 / static_cast<double>(values.size());
+        for (Complex& value : values) {
+            value *= scale;
+        }
+    }
+}
+
+std::vector<double> gccPhatCorrelation(const std::vector<float>& recording,
+                                        const std::vector<float>& probe)
+{
+    const std::size_t fftSize = nextPowerOfTwo(recording.size() + probe.size() - 1);
+    std::vector<Complex> recordingSpectrum(fftSize);
+    std::vector<Complex> probeSpectrum(fftSize);
+    for (std::size_t index = 0; index < recording.size(); ++index) {
+        recordingSpectrum[index] = static_cast<double>(recording[index]);
+    }
+    for (std::size_t index = 0; index < probe.size(); ++index) {
+        probeSpectrum[index] = static_cast<double>(probe[index]);
+    }
+    fft(recordingSpectrum, false);
+    fft(probeSpectrum, false);
+    for (std::size_t index = 0; index < fftSize; ++index) {
+        const Complex crossSpectrum = recordingSpectrum[index]
+                                      * std::conj(probeSpectrum[index]);
+        const double magnitude = std::abs(crossSpectrum);
+        recordingSpectrum[index] = magnitude > 1.0e-12
+                                       ? crossSpectrum / magnitude
+                                       : Complex(0.0, 0.0);
+    }
+    fft(recordingSpectrum, true);
+
+    std::vector<double> result(fftSize, 0.0);
+    for (std::size_t index = 0; index < fftSize; ++index) {
+        result[index] = recordingSpectrum[index].real();
+    }
+    return result;
+}
 
 double smoothFade(double seconds, double duration, double fadeSeconds)
 {
@@ -240,9 +327,31 @@ ProbeDetection detectKnownProbe(const std::vector<float>& recording,
         static_cast<std::size_t>(std::llround(searchEnd * decimatedRate)),
         samples.size() - probe.size());
 
-    double bestScore = 0.0;
+    if (firstOffset > lastOffset) {
+        return result;
+    }
+
+    // 先用 GCC-PHAT 的互谱相位定位候选峰，再只对峰值附近计算归一化相关。
+    // 这样把全搜索从 O(N*M) 降为 O(N log N)，同时保留原有置信度定义。
+    const std::vector<double> phatCorrelation = gccPhatCorrelation(samples, probe);
+    const std::size_t maximumOffset = samples.size() - probe.size();
     std::size_t bestOffset = firstOffset;
+    double bestPhatScore = -1.0;
     for (std::size_t offset = firstOffset; offset <= lastOffset; ++offset) {
+        if (offset >= phatCorrelation.size()) {
+            break;
+        }
+        const double score = std::abs(phatCorrelation[offset]);
+        if (score > bestPhatScore) {
+            bestPhatScore = score;
+            bestOffset = offset;
+        }
+    }
+
+    auto normalizedScore = [&](std::size_t offset) {
+        if (offset > maximumOffset) {
+            return 0.0;
+        }
         double dot = 0.0;
         for (std::size_t index = 0; index < probe.size(); ++index) {
             dot += static_cast<double>(probe[index]) * samples[offset + index];
@@ -250,17 +359,26 @@ ProbeDetection detectKnownProbe(const std::vector<float>& recording,
         const double windowEnergy = energyPrefix[offset + probe.size()]
                                     - energyPrefix[offset];
         if (windowEnergy <= std::numeric_limits<double>::epsilon()) {
-            continue;
+            return 0.0;
         }
-        const double score = std::abs(dot) / std::sqrt(probeEnergy * windowEnergy);
-        if (score > bestScore) {
-            bestScore = score;
-            bestOffset = offset;
+        return std::abs(dot) / std::sqrt(probeEnergy * windowEnergy);
+    };
+
+    const double bestScore = normalizedScore(bestOffset);
+    double fractionalOffset = 0.0;
+    if (bestOffset > firstOffset && bestOffset < lastOffset) {
+        const double previousScore = normalizedScore(bestOffset - 1);
+        const double nextScore = normalizedScore(bestOffset + 1);
+        const double denominator = previousScore - 2.0 * bestScore + nextScore;
+        if (std::abs(denominator) > 1.0e-12) {
+            fractionalOffset = std::clamp(
+                0.5 * (previousScore - nextScore) / denominator, -0.5, 0.5);
         }
     }
 
     result.confidence = bestScore;
-    result.arrivalSeconds = static_cast<double>(bestOffset * decimation) / sampleRate;
+    result.arrivalSeconds = (static_cast<double>(bestOffset) + fractionalOffset)
+                            * decimation / sampleRate;
     result.relativeDelaySeconds = result.arrivalSeconds - expectedStartSeconds;
     result.detected = bestScore >= detectionThreshold;
     return result;

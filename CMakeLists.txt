@@ -115,6 +115,8 @@ if(BUILD_TESTING)
         src/phone_pairing_server.h
         src/remote_microphone_buffer.cpp
         src/remote_microphone_buffer.h
+        src/audio_clock_model.cpp
+        src/audio_clock_model.h
     )
     if(MSVC)
         target_compile_options(PhonePairingServerTest PRIVATE /W4 /permissive- /utf-8)

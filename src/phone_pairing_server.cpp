@@ -439,6 +439,15 @@ void PhonePairingServer::processFrames()
             updateMicrophoneStreaming(false);
             continue;
         }
+        if (frameType == 4) {
+            if (microphoneStreaming_ && body.size() >= 17) {
+                const auto* bodyRaw = reinterpret_cast<const uchar*>(body.constData());
+                const quint64 frameIndex = qFromBigEndian<quint64>(bodyRaw + 1);
+                const quint64 monotonicNanoseconds = qFromBigEndian<quint64>(bodyRaw + 9);
+                remoteBuffer_->addClockSample(frameIndex, monotonicNanoseconds);
+            }
+            continue;
+        }
         if (frameType != 1 || body.size() < 13) {
             continue;
         }

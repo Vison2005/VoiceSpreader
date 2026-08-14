@@ -45,6 +45,43 @@ bool verifyProbe(const std::vector<float>& probe,
     }
     return true;
 }
+
+bool verifyFractionalDelay()
+{
+    constexpr std::uint32_t sampleRate = 16000;
+    constexpr double expectedSeconds = 0.15;
+    constexpr double injectedDelaySeconds = 0.1234;
+    constexpr double fractionalSample = 0.37;
+    const std::vector<float> probe = generateCalibrationProbe(sampleRate);
+    std::vector<float> recording(sampleRate, 0.0F);
+    const std::size_t insertionFrame = static_cast<std::size_t>(
+        std::llround((expectedSeconds + injectedDelaySeconds) * sampleRate));
+    for (std::size_t index = 0; index < probe.size(); ++index) {
+        recording[insertionFrame + index]
+            += static_cast<float>((1.0 - fractionalSample) * probe[index]);
+        recording[insertionFrame + index + 1]
+            += static_cast<float>(fractionalSample * probe[index]);
+    }
+    const ProbeDetection detection = detectKnownProbe(recording,
+                                                       sampleRate,
+                                                       probe,
+                                                       expectedSeconds,
+                                                       0.05,
+                                                       0.30,
+                                                       0.05);
+    const double expectedDelay = (static_cast<double>(insertionFrame)
+                                  + fractionalSample)
+                                 / sampleRate
+                                 - expectedSeconds;
+    if (!detection.detected
+        || std::abs(detection.relativeDelaySeconds - expectedDelay) > 1.0 / sampleRate) {
+        std::cerr << "Fractional probe failed, delay=" << detection.relativeDelaySeconds
+                  << ", expected=" << expectedDelay
+                  << ", confidence=" << detection.confidence << '\n';
+        return false;
+    }
+    return true;
+}
 }
 
 int main()
@@ -95,6 +132,9 @@ int main()
                      13500.0,
                      18100.0,
                      "Spread-spectrum")) {
+        return 1;
+    }
+    if (!verifyFractionalDelay()) {
         return 1;
     }
 
