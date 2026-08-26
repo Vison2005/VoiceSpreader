@@ -51,6 +51,11 @@ int main()
 
     const bool renderValid = verifyEnumeration(&VS_GetRenderDevicesJson, "render enumeration");
     const bool captureValid = verifyEnumeration(&VS_GetCaptureDevicesJson, "capture enumeration");
+    const std::int16_t samples[]{0, 16384, -16384, 32767, -32768};
+    VS_SetRemoteMicrophoneConnected(handle, 1, 48000);
+    VS_AppendRemoteMicrophonePcm16(handle, 123456, 48000, samples, 5);
+    VS_AddRemoteMicrophoneClockSample(handle, 123456, 1'000'000'000ULL);
+    VS_SetRemoteMicrophoneConnected(handle, 0, 0);
     VS_Destroy(handle);
     return renderValid && captureValid ? 0 : 1;
 }

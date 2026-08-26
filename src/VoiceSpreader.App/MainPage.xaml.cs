@@ -2,6 +2,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using VoiceSpreader.App.Models;
+using VoiceSpreader.App.Services;
 using VoiceSpreader.App.ViewModels;
 
 namespace VoiceSpreader.App;
@@ -14,6 +15,7 @@ public sealed partial class MainPage : Page
     {
         ViewModel = new MainViewModel(((App)Application.Current).Host, DispatcherQueue);
         InitializeComponent();
+        ThemeSelector.SelectedItem = ThemeSelector.Items[(int)ViewModel.ThemeMode];
     }
 
     public MainViewModel ViewModel { get; }
@@ -43,6 +45,65 @@ public sealed partial class MainPage : Page
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs args) =>
         await ViewModel.RefreshDevicesAsync();
+
+    private async void BluetoothFlyout_Opening(object sender, object args)
+    {
+        if (ViewModel.BluetoothDevices.Count == 0 && !ViewModel.IsBluetoothBusy)
+        {
+            await ViewModel.RefreshBluetoothDevicesAsync();
+        }
+    }
+
+    private async void RefreshBluetoothButton_Click(object sender, RoutedEventArgs args) =>
+        await ViewModel.RefreshBluetoothDevicesAsync();
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "WinUI XAML 事件处理器必须是页面实例方法。")]
+    private async void PairBluetoothButton_Click(object sender, RoutedEventArgs args) =>
+        await Windows.System.Launcher.LaunchUriAsync(new Uri("ms-settings:bluetooth"));
+
+    private async void BluetoothActionButton_Click(object sender, RoutedEventArgs args)
+    {
+        var error = await ViewModel.ConnectOrDisconnectBluetoothAsync();
+        if (error is not null)
+        {
+            await ShowValidationAsync("蓝牙音频连接失败", error);
+        }
+    }
+
+    private async void PhoneMicrophoneButton_Click(object sender, RoutedEventArgs args)
+    {
+        var error = await ViewModel.TogglePhoneMicrophoneAsync();
+        if (error is not null)
+        {
+            await ShowValidationAsync("手机麦克风控制失败", error);
+        }
+    }
+
+    private async void PhoneFlyout_Opening(object sender, object args) =>
+        await UpdatePhoneQrCodeAsync();
+
+    private async void PhoneAddress_SelectionChanged(object sender, SelectionChangedEventArgs args) =>
+        await UpdatePhoneQrCodeAsync();
+
+    private async void ResetPhonePairingButton_Click(object sender, RoutedEventArgs args)
+    {
+        ViewModel.ResetPhonePairing();
+        await UpdatePhoneQrCodeAsync();
+    }
+
+    private void DisconnectPhoneButton_Click(object sender, RoutedEventArgs args) =>
+        ViewModel.DisconnectPhone();
+
+    private async Task UpdatePhoneQrCodeAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(ViewModel.PhonePairingPayload))
+        {
+            PhoneQrImage.Source = await QrCodeService.CreateImageAsync(ViewModel.PhonePairingPayload);
+        }
+    }
 
     private void OutputCheckBox_Click(object sender, RoutedEventArgs args)
     {
@@ -79,6 +140,21 @@ public sealed partial class MainPage : Page
             ViewModel.BufferMilliseconds = (int)Math.Round(args.NewValue);
         }
     }
+
+    private void ThemeSelector_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args)
+    {
+        var selectedIndex = sender.Items.IndexOf(sender.SelectedItem);
+        if (selectedIndex < 0)
+        {
+            return;
+        }
+
+        ViewModel.ThemeMode = (AppThemeMode)selectedIndex;
+        ((App)Application.Current).ApplyTheme(ViewModel.ThemeMode);
+    }
+
+    private void MinimizeToTrayButton_Click(object sender, RoutedEventArgs args) =>
+        ((App)Application.Current).MinimizeToTray();
 
     private async void StartButton_Click(object sender, RoutedEventArgs args)
     {

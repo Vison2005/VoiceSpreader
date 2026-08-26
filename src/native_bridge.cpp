@@ -2,6 +2,7 @@
 
 #include "audio_engine.h"
 #include "latency_calibrator.h"
+#include "remote_microphone_buffer.h"
 #include "wasapi_device_manager.h"
 
 #include <QJsonArray>
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 namespace
 {
@@ -186,6 +188,8 @@ struct BridgeHandle
 
     AudioEngine engine;
     LatencyCalibrator calibrator;
+    std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone =
+        std::make_shared<RemoteMicrophoneBuffer>();
     VsTextCallback statusCallback = nullptr;
     VsTextCallback errorCallback = nullptr;
     VsStateCallback runningCallback = nullptr;
@@ -272,7 +276,9 @@ int __cdecl VS_Start(void* handle, const wchar_t* configurationJson)
                configuration.value(QStringLiteral("automaticLatencyCompensation")).toBool(true),
                microphone,
                configuration.value(QStringLiteral("continuousAcousticTracking")).toBool(),
-               nullptr)
+               configuration.value(QStringLiteral("useRemoteMicrophone")).toBool()
+                   ? value->remoteMicrophone
+                   : nullptr)
                ? 1
                : 0;
 }
@@ -349,4 +355,50 @@ int __cdecl VS_IsCalibrating(void* handle)
 {
     BridgeHandle* value = bridge(handle);
     return value != nullptr && value->calibrator.isActive() ? 1 : 0;
+}
+
+void __cdecl VS_SetRemoteMicrophoneConnected(void* handle,
+                                             int connected,
+                                             std::uint32_t sampleRate)
+{
+    if (BridgeHandle* value = bridge(handle)) {
+        value->remoteMicrophone->setConnected(connected != 0,
+                                              connected != 0 ? sampleRate : 0);
+    }
+}
+
+void __cdecl VS_AddRemoteMicrophoneClockSample(
+    void* handle,
+    std::uint64_t frameIndex,
+    std::uint64_t monotonicNanoseconds)
+{
+    if (BridgeHandle* value = bridge(handle)) {
+        value->remoteMicrophone->addClockSample(frameIndex,
+                                                monotonicNanoseconds);
+    }
+}
+
+void __cdecl VS_AppendRemoteMicrophonePcm16(
+    void* handle,
+    std::uint64_t firstFrameIndex,
+    std::uint32_t sampleRate,
+    const std::int16_t* samples,
+    int sampleCount)
+{
+    BridgeHandle* value = bridge(handle);
+    if (value == nullptr || samples == nullptr || sampleCount <= 0
+        || sampleRate < 8000 || sampleRate > 192000) {
+        return;
+    }
+
+    std::vector<float> normalized(static_cast<std::size_t>(sampleCount));
+    std::transform(samples,
+                   samples + sampleCount,
+                   normalized.begin(),
+                   [](std::int16_t sample) {
+                       return static_cast<float>(sample) / 32768.0F;
+                   });
+    value->remoteMicrophone->append(firstFrameIndex,
+                                    sampleRate,
+                                    normalized);
 }

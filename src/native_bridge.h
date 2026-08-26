@@ -40,3 +40,17 @@ VS_NATIVE_API int __cdecl VS_StartCalibration(void* handle,
                                               const wchar_t* configurationJson);
 VS_NATIVE_API void __cdecl VS_StopCalibration(void* handle);
 VS_NATIVE_API int __cdecl VS_IsCalibrating(void* handle);
+
+VS_NATIVE_API void __cdecl VS_SetRemoteMicrophoneConnected(void* handle,
+                                                           int connected,
+                                                           std::uint32_t sampleRate);
+VS_NATIVE_API void __cdecl VS_AddRemoteMicrophoneClockSample(
+    void* handle,
+    std::uint64_t frameIndex,
+    std::uint64_t monotonicNanoseconds);
+VS_NATIVE_API void __cdecl VS_AppendRemoteMicrophonePcm16(
+    void* handle,
+    std::uint64_t firstFrameIndex,
+    std::uint32_t sampleRate,
+    const std::int16_t* samples,
+    int sampleCount);

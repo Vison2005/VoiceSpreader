@@ -1,10 +1,16 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using System.Runtime.InteropServices;
+using VoiceSpreader.App.Models;
+using VoiceSpreader.App.Services;
 using Windows.Graphics;
 
 namespace VoiceSpreader.App;
 
+[System.Diagnostics.CodeAnalysis.SuppressMessage(
+    "Design",
+    "CA1001:Types that own disposable fields should be disposable",
+    Justification = "WinUI Window 生命周期由 AppWindow 管理，Closing 事件会释放托盘资源。")]
 public sealed partial class MainWindow : Window
 {
     private const int InitialLogicalWidth = 1160;
@@ -12,6 +18,10 @@ public sealed partial class MainWindow : Window
     private const int MinimumLogicalWidth = 760;
     private const int MinimumLogicalHeight = 680;
     private bool _initialSizeApplied;
+    private readonly TrayIconService _trayIcon;
+    private bool _exitRequested;
+    private bool _trayMessageShown;
+    private bool _disposed;
 
     public MainWindow()
     {
@@ -20,8 +30,46 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
         AppWindow.SetIcon("Assets/AppIcon.ico");
         AppWindow.Closing += AppWindow_Closing;
+        _trayIcon = new TrayIconService();
+        _trayIcon.ShowRequested += TrayIcon_ShowRequested;
+        _trayIcon.HideRequested += TrayIcon_HideRequested;
+        _trayIcon.ExitRequested += TrayIcon_ExitRequested;
         RootFrame.Navigate(typeof(MainPage));
         RootFrame.Loaded += RootFrame_Loaded;
+    }
+
+    public void MinimizeToTray()
+    {
+        AppWindow.Hide();
+        if (!_trayMessageShown)
+        {
+            _trayIcon.ShowFirstMinimizeMessage();
+            _trayMessageShown = true;
+        }
+    }
+
+    private void TrayIcon_ShowRequested(object? sender, EventArgs args)
+    {
+        AppWindow.Show();
+        Activate();
+    }
+
+    private void TrayIcon_HideRequested(object? sender, EventArgs args) => MinimizeToTray();
+
+    private void TrayIcon_ExitRequested(object? sender, EventArgs args)
+    {
+        _exitRequested = true;
+        Close();
+    }
+
+    public void ApplyTheme(AppThemeMode mode)
+    {
+        WindowRoot.RequestedTheme = mode switch
+        {
+            AppThemeMode.Light => ElementTheme.Light,
+            AppThemeMode.Dark => ElementTheme.Dark,
+            _ => ElementTheme.Default,
+        };
     }
 
     private void RootFrame_Loaded(object sender, RoutedEventArgs args)
@@ -70,6 +118,28 @@ public sealed partial class MainWindow : Window
 
     private void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
     {
+        if (!_exitRequested)
+        {
+            args.Cancel = true;
+            MinimizeToTray();
+            return;
+        }
+
+        DisposeTrayIcon();
         ((App)Application.Current).Host.Dispose();
+    }
+
+    private void DisposeTrayIcon()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _trayIcon.ShowRequested -= TrayIcon_ShowRequested;
+        _trayIcon.HideRequested -= TrayIcon_HideRequested;
+        _trayIcon.ExitRequested -= TrayIcon_ExitRequested;
+        _trayIcon.Dispose();
     }
 }

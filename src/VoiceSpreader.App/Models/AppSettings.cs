@@ -1,5 +1,12 @@
 namespace VoiceSpreader.App.Models;
 
+public enum AppThemeMode
+{
+    System,
+    Light,
+    Dark,
+}
+
 public sealed record OutputSettings(bool Selected = false, int VolumePercent = 100, int DelayMilliseconds = 0);
 
 public sealed record AppSettings
@@ -15,6 +22,10 @@ public sealed record AppSettings
     public bool ContinuousAcousticTracking { get; init; } = true;
 
     public bool ExclusiveMode { get; init; }
+
+    public AppThemeMode ThemeMode { get; init; } = AppThemeMode.System;
+
+    public string? PhonePairingAddress { get; init; }
 
     public Dictionary<string, OutputSettings> Outputs { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }

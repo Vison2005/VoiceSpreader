@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using VoiceSpreader.App.Models;
 using VoiceSpreader.App.Services;
 
 namespace VoiceSpreader.App;
@@ -21,7 +22,11 @@ public partial class App : Application
         {
             await Host.InitializeAsync();
             _window = new MainWindow();
-            _window.Activate();
+            _window.ApplyTheme(Host.Settings.ThemeMode);
+            if (!Environment.GetCommandLineArgs().Contains("--background", StringComparer.OrdinalIgnoreCase))
+            {
+                _window.Activate();
+            }
         }
         catch (Exception exception)
         {
@@ -29,6 +34,10 @@ public partial class App : Application
             Exit();
         }
     }
+
+    public void ApplyTheme(AppThemeMode mode) => _window?.ApplyTheme(mode);
+
+    public void MinimizeToTray() => _window?.MinimizeToTray();
 
     private void App_UnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs args)
     {

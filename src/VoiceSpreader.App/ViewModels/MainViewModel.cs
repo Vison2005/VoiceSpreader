@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Dispatching;
 using VoiceSpreader.App.Models;
@@ -11,6 +12,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly AppHost _host;
     private readonly NativeAudioEngineBridge _engine;
+    private readonly BluetoothAudioReceiverService _bluetooth;
+    private readonly PhonePairingService _phone;
     private readonly DispatcherQueue _dispatcher;
     private readonly Dictionary<string, OutputSettings> _savedOutputs;
     private AudioEndpoint? _selectedCapture;
@@ -19,10 +22,23 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _automaticLatencyCompensation;
     private bool _continuousAcousticTracking;
     private bool _exclusiveMode;
+    private AppThemeMode _themeMode;
     private bool _isBusy;
     private bool _isStarting;
     private bool _isRunning;
     private bool _isCalibrating;
+    private bool _isBluetoothBusy;
+    private bool _isBluetoothConnected;
+    private bool _startWithWindows;
+    private BluetoothAudioDevice? _selectedBluetoothDevice;
+    private string _bluetoothStatus = "尚未扫描蓝牙音频设备。";
+    private bool _isPhoneConnected;
+    private bool _isPhoneMicrophoneStreaming;
+    private string _phoneName = string.Empty;
+    private string _phoneStatus = "等待手机输入配对码。";
+    private double _phoneLevelPercent;
+    private string? _selectedPhoneAddress;
+    private bool _restartAfterStop;
     private string _statusBadge = "已停止";
     private string _statusTitle = "等待配置";
     private string _statusMessage = "选择一个系统声音来源和至少一个输出设备。";
@@ -34,20 +50,47 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         _host = host;
         _engine = host.AudioEngine;
+        _bluetooth = host.BluetoothAudioReceiver;
+        _phone = host.PhonePairing;
         _dispatcher = dispatcher;
         _bufferMilliseconds = host.Settings.BufferMilliseconds;
         _automaticLatencyCompensation = host.Settings.AutomaticLatencyCompensation;
         _continuousAcousticTracking = host.Settings.ContinuousAcousticTracking;
         _exclusiveMode = host.Settings.ExclusiveMode;
+        _themeMode = host.Settings.ThemeMode;
         _savedOutputs = new Dictionary<string, OutputSettings>(
             host.Settings.Outputs,
             StringComparer.OrdinalIgnoreCase);
+        _startWithWindows = AutoStartService.IsEnabled;
 
         _engine.StatusChanged += Engine_StatusChanged;
         _engine.ErrorOccurred += Engine_ErrorOccurred;
         _engine.RunningChanged += Engine_RunningChanged;
         _engine.ProgramLevelChanged += Engine_ProgramLevelChanged;
         _engine.CalibrationCompleted += Engine_CalibrationCompleted;
+        _bluetooth.StatusChanged += Bluetooth_StatusChanged;
+        _bluetooth.ErrorOccurred += Bluetooth_ErrorOccurred;
+        _bluetooth.BusyChanged += Bluetooth_BusyChanged;
+        _bluetooth.ConnectionChanged += Bluetooth_ConnectionChanged;
+        _phone.StatusChanged += Phone_StatusChanged;
+        _phone.ConnectionChanged += Phone_ConnectionChanged;
+        _phone.MicrophoneStreamingChanged += Phone_MicrophoneStreamingChanged;
+        _phone.MicrophoneLevelChanged += Phone_MicrophoneLevelChanged;
+
+        try
+        {
+            _phone.Start();
+            ReplaceCollection(PhoneAddresses, _phone.LocalAddresses);
+            var savedAddress = host.Settings.PhonePairingAddress;
+            _selectedPhoneAddress = !string.IsNullOrWhiteSpace(savedAddress)
+                                    && _phone.SetLocalAddress(savedAddress)
+                ? savedAddress
+                : _phone.LocalAddress;
+        }
+        catch (Exception exception) when (exception is SocketException or InvalidOperationException)
+        {
+            NoticeMessage = $"手机配对服务启动失败：{exception.Message}";
+        }
 
         if (!_engine.IsAvailable)
         {
@@ -66,6 +109,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<OutputEndpointItem> SelectedOutputs { get; } = [];
 
     public ObservableCollection<string> Activity { get; } = [];
+
+    public ObservableCollection<BluetoothAudioDevice> BluetoothDevices { get; } = [];
+
+    public ObservableCollection<string> PhoneAddresses { get; } = [];
 
     public bool IsEngineAvailable => _engine.IsAvailable;
 
@@ -140,6 +187,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set
         {
             if (SetField(ref _exclusiveMode, value))
+            {
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public AppThemeMode ThemeMode
+    {
+        get => _themeMode;
+        set
+        {
+            if (SetField(ref _themeMode, value))
             {
                 _ = SaveSettingsAsync();
             }
@@ -222,6 +281,174 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public bool HasNotice => !string.IsNullOrWhiteSpace(NoticeMessage);
 
+    public BluetoothAudioDevice? SelectedBluetoothDevice
+    {
+        get => _selectedBluetoothDevice;
+        set => SetField(ref _selectedBluetoothDevice, value);
+    }
+
+    public bool IsBluetoothBusy
+    {
+        get => _isBluetoothBusy;
+        private set
+        {
+            if (SetField(ref _isBluetoothBusy, value))
+            {
+                OnPropertyChanged(nameof(IsBluetoothIdle));
+            }
+        }
+    }
+
+    public bool IsBluetoothIdle => !IsBluetoothBusy;
+
+    public bool IsBluetoothConnected
+    {
+        get => _isBluetoothConnected;
+        private set
+        {
+            if (SetField(ref _isBluetoothConnected, value))
+            {
+                OnPropertyChanged(nameof(BluetoothActionText));
+            }
+        }
+    }
+
+    public string BluetoothActionText => IsBluetoothConnected ? "断开连接" : "连接并接收声音";
+
+    public string BluetoothStatus
+    {
+        get => _bluetoothStatus;
+        private set => SetField(ref _bluetoothStatus, value);
+    }
+
+    public bool IsPhoneConnected
+    {
+        get => _isPhoneConnected;
+        private set
+        {
+            if (SetField(ref _isPhoneConnected, value))
+            {
+                OnPropertyChanged(nameof(PhoneConnectionText));
+            }
+        }
+    }
+
+    public bool IsPhoneMicrophoneStreaming
+    {
+        get => _isPhoneMicrophoneStreaming;
+        private set
+        {
+            if (SetField(ref _isPhoneMicrophoneStreaming, value))
+            {
+                OnPropertyChanged(nameof(PhoneMicrophoneActionText));
+            }
+        }
+    }
+
+    public string PhoneConnectionText => IsPhoneConnected
+        ? $"已连接：{_phoneName}"
+        : "等待手机连接";
+
+    public string PhoneMicrophoneActionText => IsPhoneMicrophoneStreaming ? "停用麦克风" : "启用麦克风";
+
+    public string PhonePairingCode => _phone.PairingCode;
+
+    public string PhonePairingPayload => _phone.PairingPayload;
+
+    public string PhoneStatus
+    {
+        get => _phoneStatus;
+        private set => SetField(ref _phoneStatus, value);
+    }
+
+    public double PhoneLevelPercent
+    {
+        get => _phoneLevelPercent;
+        private set => SetField(ref _phoneLevelPercent, value);
+    }
+
+    public string? SelectedPhoneAddress
+    {
+        get => _selectedPhoneAddress;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value) || !SetField(ref _selectedPhoneAddress, value))
+            {
+                return;
+            }
+            if (_phone.SetLocalAddress(value))
+            {
+                OnPropertyChanged(nameof(PhonePairingPayload));
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public async Task<string?> TogglePhoneMicrophoneAsync() =>
+        await _phone.SetMicrophoneEnabledAsync(!IsPhoneMicrophoneStreaming)
+            ? null
+            : "手机尚未连接或控制命令发送失败。";
+
+    public void DisconnectPhone() => _phone.DisconnectPhone();
+
+    public void ResetPhonePairing()
+    {
+        _phone.ResetPairing();
+        OnPropertyChanged(nameof(PhonePairingCode));
+        OnPropertyChanged(nameof(PhonePairingPayload));
+    }
+
+    public bool StartWithWindows
+    {
+        get => _startWithWindows;
+        set
+        {
+            if (_startWithWindows == value)
+            {
+                return;
+            }
+
+            try
+            {
+                AutoStartService.SetEnabled(value);
+                SetField(ref _startWithWindows, value);
+                AddActivity(value ? "已启用开机自启动" : "已关闭开机自启动");
+            }
+            catch (Exception exception)
+            {
+                NoticeMessage = $"更新开机自启动失败：{exception.Message}";
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public async Task RefreshBluetoothDevicesAsync()
+    {
+        var devices = await _bluetooth.GetDevicesAsync();
+        Dispatch(() =>
+        {
+            ReplaceCollection(BluetoothDevices, devices);
+            SelectedBluetoothDevice = devices.Count > 0 ? devices[0] : null;
+        });
+    }
+
+    public async Task<string?> ConnectOrDisconnectBluetoothAsync()
+    {
+        if (IsBluetoothConnected)
+        {
+            _bluetooth.Disconnect();
+            return null;
+        }
+        if (SelectedBluetoothDevice is null)
+        {
+            return "请选择一个已配对的蓝牙音频设备。";
+        }
+
+        return await _bluetooth.ConnectAsync(SelectedBluetoothDevice)
+            ? null
+            : "未能建立蓝牙音频连接，请查看状态信息。";
+    }
+
     public async Task RefreshDevicesAsync()
     {
         if (!IsEngineAvailable || IsRunning || IsCalibrating)
@@ -288,7 +515,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             return "请至少选择一个输出设备。";
         }
-        if (ContinuousAcousticTracking && selected.Length >= 2 && SelectedMicrophone is null)
+        var usePhoneMicrophone = ContinuousAcousticTracking
+                                 && selected.Length >= 2
+                                 && IsPhoneConnected
+                                 && IsPhoneMicrophoneStreaming;
+        if (ContinuousAcousticTracking && selected.Length >= 2
+            && !usePhoneMicrophone && SelectedMicrophone is null)
         {
             return "启用自同步时，请选择用于连续测量的麦克风。";
         }
@@ -304,7 +536,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             ExclusiveMode,
             AutomaticLatencyCompensation,
             SelectedMicrophone,
-            ContinuousAcousticTracking && selected.Length >= 2);
+            ContinuousAcousticTracking && selected.Length >= 2,
+            usePhoneMicrophone);
 
         _isStarting = true;
         OnPropertyChanged(nameof(StartButtonText));
@@ -436,6 +669,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             AutomaticLatencyCompensation = AutomaticLatencyCompensation,
             ContinuousAcousticTracking = ContinuousAcousticTracking,
             ExclusiveMode = ExclusiveMode,
+            ThemeMode = ThemeMode,
+            PhonePairingAddress = SelectedPhoneAddress,
             Outputs = new Dictionary<string, OutputSettings>(_savedOutputs, StringComparer.OrdinalIgnoreCase),
         };
         try
@@ -474,6 +709,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (!running)
         {
             ProgramLevelText = "节目电平 -- dBFS · 探针暂停";
+            if (_restartAfterStop)
+            {
+                _restartAfterStop = false;
+                var error = StartOrStop();
+                if (error is not null)
+                {
+                    NoticeMessage = error;
+                }
+            }
         }
     });
 
@@ -516,6 +760,60 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             ? "声学路径补偿已写入设备，并关闭端点自动补偿以避免重复计算。"
             : "未获得可应用的测量结果，请检查麦克风位置和播放音量。";
         AddActivity(StatusMessage);
+    });
+
+    private void Bluetooth_StatusChanged(object? sender, string message) => Dispatch(() =>
+    {
+        BluetoothStatus = message;
+        AddActivity(message);
+    });
+
+    private void Bluetooth_ErrorOccurred(object? sender, string message) => Dispatch(() =>
+    {
+        BluetoothStatus = message;
+        NoticeMessage = message;
+        AddActivity(message);
+    });
+
+    private void Bluetooth_BusyChanged(object? sender, bool busy) =>
+        Dispatch(() => IsBluetoothBusy = busy);
+
+    private void Bluetooth_ConnectionChanged(object? sender, bool connected) => Dispatch(() =>
+    {
+        IsBluetoothConnected = connected;
+        OnPropertyChanged(nameof(BluetoothActionText));
+    });
+
+    private void Phone_StatusChanged(object? sender, string message) => Dispatch(() =>
+    {
+        PhoneStatus = message;
+        AddActivity(message);
+    });
+
+    private void Phone_ConnectionChanged(object? sender, PhoneConnectionChangedEventArgs args) => Dispatch(() =>
+    {
+        _phoneName = args.Connected ? args.PhoneName : string.Empty;
+        IsPhoneConnected = args.Connected;
+        OnPropertyChanged(nameof(PhoneConnectionText));
+    });
+
+    private void Phone_MicrophoneStreamingChanged(object? sender, bool enabled) => Dispatch(() =>
+    {
+        var changed = IsPhoneMicrophoneStreaming != enabled;
+        IsPhoneMicrophoneStreaming = enabled;
+        if (changed && _engine.IsActive && ContinuousAcousticTracking)
+        {
+            _restartAfterStop = true;
+            AddActivity(enabled
+                ? "正在切换为手机麦克风，音频同步将自动重启"
+                : "手机麦克风已停用，音频同步将切回本机麦克风");
+            _engine.Stop();
+        }
+    });
+
+    private void Phone_MicrophoneLevelChanged(object? sender, double levelDbfs) => Dispatch(() =>
+    {
+        PhoneLevelPercent = Math.Clamp((levelDbfs + 60) / 60 * 100, 0, 100);
     });
 
     private void AddActivity(string message)
@@ -581,6 +879,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _engine.RunningChanged -= Engine_RunningChanged;
         _engine.ProgramLevelChanged -= Engine_ProgramLevelChanged;
         _engine.CalibrationCompleted -= Engine_CalibrationCompleted;
+        _bluetooth.StatusChanged -= Bluetooth_StatusChanged;
+        _bluetooth.ErrorOccurred -= Bluetooth_ErrorOccurred;
+        _bluetooth.BusyChanged -= Bluetooth_BusyChanged;
+        _bluetooth.ConnectionChanged -= Bluetooth_ConnectionChanged;
+        _phone.StatusChanged -= Phone_StatusChanged;
+        _phone.ConnectionChanged -= Phone_ConnectionChanged;
+        _phone.MicrophoneStreamingChanged -= Phone_MicrophoneStreamingChanged;
+        _phone.MicrophoneLevelChanged -= Phone_MicrophoneLevelChanged;
         foreach (var output in Outputs)
         {
             output.SettingsChanged -= Output_SettingsChanged;

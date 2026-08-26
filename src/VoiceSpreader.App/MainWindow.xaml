@@ -8,7 +8,7 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
 
-    <Grid Background="{ThemeResource VoicePageBrush}">
+    <Grid x:Name="WindowRoot" Background="{ThemeResource VoicePageBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />

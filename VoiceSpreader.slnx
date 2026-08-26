@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="src/VoiceSpreader.App/VoiceSpreader.App.csproj" />
+  <Project Path="tests/VoiceSpreader.App.Smoke/VoiceSpreader.App.Smoke.csproj" />
 </Solution>

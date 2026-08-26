@@ -4,6 +4,15 @@ using VoiceSpreader.App.Models;
 
 namespace VoiceSpreader.App.Services;
 
+public interface IRemoteMicrophoneSink
+{
+    void SetRemoteMicrophoneConnected(bool connected, uint sampleRate = 48_000);
+
+    void AddRemoteMicrophoneClockSample(ulong frameIndex, ulong monotonicNanoseconds);
+
+    void AppendRemoteMicrophonePcm16(ulong firstFrameIndex, uint sampleRate, short[] samples);
+}
+
 public sealed record DeviceEnumerationResult(IReadOnlyList<AudioEndpoint> Devices, string? Error);
 
 public sealed record OutputEngineSettings(AudioEndpoint Device, int VolumePercent, int DelayMilliseconds);
@@ -15,7 +24,8 @@ public sealed record EngineConfiguration(
     bool ExclusiveMode,
     bool AutomaticLatencyCompensation,
     AudioEndpoint? Microphone,
-    bool ContinuousAcousticTracking);
+    bool ContinuousAcousticTracking,
+    bool UseRemoteMicrophone);
 
 public sealed record CalibrationConfiguration(AudioEndpoint Microphone, IReadOnlyList<AudioEndpoint> Outputs);
 
@@ -38,7 +48,7 @@ public sealed class CalibrationCompletedEventArgs(IReadOnlyList<CalibrationResul
     public IReadOnlyList<CalibrationResult> Results { get; } = results;
 }
 
-public sealed class NativeAudioEngineBridge : IDisposable
+public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
 {
     private const string NativeLibrary = "VoiceSpreader.Native";
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -118,6 +128,7 @@ public sealed class NativeAudioEngineBridge : IDisposable
             configuration.AutomaticLatencyCompensation,
             microphone = configuration.Microphone,
             configuration.ContinuousAcousticTracking,
+            configuration.UseRemoteMicrophone,
         };
         return VS_Start(_handle, JsonSerializer.Serialize(payload, SerializerOptions)) != 0;
     }
@@ -168,6 +179,36 @@ public sealed class NativeAudioEngineBridge : IDisposable
         if (IsAvailable)
         {
             VS_StopCalibration(_handle);
+        }
+    }
+
+    public void SetRemoteMicrophoneConnected(bool connected, uint sampleRate = 48_000)
+    {
+        if (IsAvailable)
+        {
+            VS_SetRemoteMicrophoneConnected(_handle, connected ? 1 : 0, connected ? sampleRate : 0);
+        }
+    }
+
+    public void AddRemoteMicrophoneClockSample(ulong frameIndex, ulong monotonicNanoseconds)
+    {
+        if (IsAvailable)
+        {
+            VS_AddRemoteMicrophoneClockSample(_handle, frameIndex, monotonicNanoseconds);
+        }
+    }
+
+    public void AppendRemoteMicrophonePcm16(ulong firstFrameIndex, uint sampleRate, short[] samples)
+    {
+        ArgumentNullException.ThrowIfNull(samples);
+        if (IsAvailable && samples.Length > 0)
+        {
+            VS_AppendRemoteMicrophonePcm16(
+                _handle,
+                firstFrameIndex,
+                sampleRate,
+                samples,
+                samples.Length);
         }
     }
 
@@ -298,4 +339,21 @@ public sealed class NativeAudioEngineBridge : IDisposable
 
     [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
     private static extern int VS_IsCalibrating(nint handle);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_SetRemoteMicrophoneConnected(nint handle, int connected, uint sampleRate);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_AddRemoteMicrophoneClockSample(
+        nint handle,
+        ulong frameIndex,
+        ulong monotonicNanoseconds);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_AppendRemoteMicrophonePcm16(
+        nint handle,
+        ulong firstFrameIndex,
+        uint sampleRate,
+        [In] short[] samples,
+        int sampleCount);
 }

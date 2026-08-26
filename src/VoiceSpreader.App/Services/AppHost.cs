@@ -10,11 +10,17 @@ public sealed class AppHost : IDisposable
     {
         SettingsStore = new SettingsStore();
         AudioEngine = new NativeAudioEngineBridge();
+        BluetoothAudioReceiver = new BluetoothAudioReceiverService();
+        PhonePairing = new PhonePairingService(AudioEngine);
     }
 
     public SettingsStore SettingsStore { get; }
 
     public NativeAudioEngineBridge AudioEngine { get; }
+
+    public BluetoothAudioReceiverService BluetoothAudioReceiver { get; }
+
+    public PhonePairingService PhonePairing { get; }
 
     public AppSettings Settings { get; private set; } = new();
 
@@ -35,6 +41,8 @@ public sealed class AppHost : IDisposable
         }
 
         _disposed = true;
+        PhonePairing.Dispose();
+        BluetoothAudioReceiver.Dispose();
         AudioEngine.Dispose();
         SettingsStore.Dispose();
     }
