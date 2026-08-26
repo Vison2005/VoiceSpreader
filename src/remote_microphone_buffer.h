@@ -28,6 +28,8 @@ public:
                 const std::vector<float>& samples);
     void addClockSample(std::uint64_t frameIndex, std::uint64_t monotonicNanoseconds);
     std::uint64_t latestFrameIndex() const;
+    std::size_t bufferedFrames() const;
+    std::uint64_t trimmedFrames() const;
     bool waitUntilFrame(std::uint64_t frameIndex,
                         std::chrono::milliseconds timeout,
                         const std::atomic_bool* cancellation = nullptr);
@@ -42,6 +44,7 @@ private:
     std::uint64_t firstFrameIndex_ = 0;
     std::uint64_t nextFrameIndex_ = 0;
     std::uint32_t sampleRate_ = 0;
+    std::uint64_t trimmedFrames_ = 0;
     bool connected_ = false;
     AudioClockModel clockModel_{1'000'000'000.0, 32};
 };

@@ -28,7 +28,8 @@ public:
                  int targetBufferMilliseconds,
                  int volumePercent,
                  bool preferExclusiveMode,
-                 StatusCallback statusCallback);
+                 StatusCallback statusCallback,
+                 bool adaptiveRateControl = true);
     ~OutputWorker();
 
     OutputWorker(const OutputWorker&) = delete;
@@ -46,6 +47,7 @@ public:
     void setManualDelayMilliseconds(int delayMilliseconds);
     void setAutomaticDelayMilliseconds(int delayMilliseconds);
     void setAcousticDelayMilliseconds(int delayMilliseconds);
+    void setAcousticDelayMillisecondsPrecise(double delayMilliseconds);
     std::uint64_t scheduleAcousticProbe(const std::vector<float>& probe,
                                         float amplitude);
     bool waitForAcousticProbeStart(std::uint64_t generation,
@@ -57,11 +59,15 @@ public:
     QString failureMessage() const;
     std::uint64_t underrunFrames() const;
     std::uint64_t correctedFrames() const;
+    std::uint64_t inputOverflowFrames() const;
+    std::uint64_t bufferRecoveryCount() const;
     double streamLatencyMilliseconds() const;
     double enginePeriodMilliseconds() const;
     bool usesLowLatencyMode() const;
     int targetBufferMilliseconds() const;
+    double targetBufferMillisecondsPrecise() const;
     int acousticDelayMilliseconds() const;
+    double acousticDelayMillisecondsPrecise() const;
     std::uint32_t inputSampleRate() const;
     double clockDriftPpm() const;
     const AudioDevice& device() const { return device_; }
@@ -78,8 +84,11 @@ private:
     std::atomic_int manualDelayMilliseconds_{0};
     std::atomic_int automaticDelayMilliseconds_{0};
     std::atomic_int acousticDelayMilliseconds_{0};
+    std::atomic<double> acousticDelayMillisecondsPrecise_{0.0};
     std::atomic_int targetBufferMilliseconds_{10};
+    std::atomic<double> targetBufferMillisecondsPrecise_{10.0};
     std::atomic_size_t targetBufferFrames_{0};
+    std::atomic<double> targetBufferFramesPrecise_{0.0};
     std::size_t sampleRate_ = 0;
     std::size_t bytesPerFrame_ = 0;
     StatusCallback statusCallback_;
@@ -90,6 +99,7 @@ private:
     std::atomic_int requestedVolumePercent_{100};
     std::atomic_uint64_t underrunFrames_{0};
     std::atomic_uint64_t correctedFrames_{0};
+    std::atomic_uint64_t bufferRecoveryCount_{0};
     std::atomic_int64_t streamLatencyHundredNanoseconds_{0};
     std::atomic_int64_t enginePeriodHundredNanoseconds_{0};
     std::atomic_bool lowLatencyMode_{false};
@@ -97,6 +107,7 @@ private:
     std::atomic<double> clockDriftPpm_{0.0};
     std::atomic_bool clockModelReady_{false};
     bool preferExclusiveMode_ = true;
+    bool adaptiveRateControl_ = true;
     std::thread thread_;
 
     mutable std::mutex initializationMutex_;

@@ -4,7 +4,8 @@
 #include <cstdint>
 #include <deque>
 
-// 用设备帧位置和 QPC 位置拟合设备硬件时钟。
+// 用设备位置和 QPC 位置拟合设备硬件时钟。设备位置可以是帧，也可以是
+// IAudioClock::GetFrequency() 定义的其他单位；计算漂移时必须传入相同单位的标称频率。
 // 该类不依赖平台 API，便于在桌面端和单元测试中复用。
 class AudioClockModel
 {

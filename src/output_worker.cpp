@@ -164,14 +164,18 @@ OutputWorker::OutputWorker(AudioDevice device,
                            int targetBufferMilliseconds,
                            int volumePercent,
                            bool preferExclusiveMode,
-                           StatusCallback statusCallback)
+                           StatusCallback statusCallback,
+                           bool adaptiveRateControl)
     : device_(std::move(device))
     , waveFormat_(std::move(waveFormat))
     , baseTargetBufferMilliseconds_(std::max(0, targetBufferMilliseconds))
     , targetBufferMilliseconds_(std::max(0, targetBufferMilliseconds))
+    , targetBufferMillisecondsPrecise_(static_cast<double>(
+          std::max(0, targetBufferMilliseconds)))
+    , statusCallback_(std::move(statusCallback))
     , requestedVolumePercent_(std::clamp(volumePercent, 0, 100))
     , preferExclusiveMode_(preferExclusiveMode)
-    , statusCallback_(std::move(statusCallback))
+    , adaptiveRateControl_(adaptiveRateControl)
 {
     if (waveFormat_.size() < sizeof(WAVEFORMATEX)) {
         throw std::invalid_argument("输出音频格式无效");
@@ -187,6 +191,7 @@ OutputWorker::OutputWorker(AudioDevice device,
     const std::size_t capacityFrames = std::max<std::size_t>(
         sampleRate_ * 3,
         targetBufferFrames_.load() * 4);
+    targetBufferFramesPrecise_ = static_cast<double>(targetBufferFrames_.load());
     ringBuffer_ = std::make_unique<FrameRingBuffer>(capacityFrames, bytesPerFrame_);
 }
 
@@ -308,7 +313,14 @@ void OutputWorker::setAutomaticDelayMilliseconds(int delayMilliseconds)
 
 void OutputWorker::setAcousticDelayMilliseconds(int delayMilliseconds)
 {
-    acousticDelayMilliseconds_ = std::clamp(delayMilliseconds, 0, 500);
+    setAcousticDelayMillisecondsPrecise(static_cast<double>(delayMilliseconds));
+}
+
+void OutputWorker::setAcousticDelayMillisecondsPrecise(double delayMilliseconds)
+{
+    const double limitedDelay = std::clamp(delayMilliseconds, 0.0, 500.0);
+    acousticDelayMillisecondsPrecise_ = limitedDelay;
+    acousticDelayMilliseconds_ = static_cast<int>(std::lround(limitedDelay));
     updateTargetBuffer();
 }
 
@@ -358,12 +370,15 @@ void OutputWorker::cancelAcousticProbe(std::uint64_t generation)
 
 void OutputWorker::updateTargetBuffer()
 {
-    const int totalMilliseconds = baseTargetBufferMilliseconds_.load()
-                                  + manualDelayMilliseconds_.load()
-                                  + automaticDelayMilliseconds_.load()
-                                  + acousticDelayMilliseconds_.load();
-    targetBufferMilliseconds_ = totalMilliseconds;
-    targetBufferFrames_ = sampleRate_ * static_cast<std::size_t>(totalMilliseconds) / 1000;
+    const double totalMilliseconds = static_cast<double>(baseTargetBufferMilliseconds_.load())
+                                     + manualDelayMilliseconds_.load()
+                                     + automaticDelayMilliseconds_.load()
+                                     + acousticDelayMillisecondsPrecise_.load();
+    const double targetFrames = static_cast<double>(sampleRate_) * totalMilliseconds / 1000.0;
+    targetBufferMilliseconds_ = static_cast<int>(std::lround(totalMilliseconds));
+    targetBufferMillisecondsPrecise_ = totalMilliseconds;
+    targetBufferFramesPrecise_ = targetFrames;
+    targetBufferFrames_ = static_cast<std::size_t>(std::ceil(std::max(0.0, targetFrames)));
 }
 
 bool OutputWorker::initializedSuccessfully() const
@@ -388,6 +403,16 @@ std::uint64_t OutputWorker::correctedFrames() const
     return correctedFrames_.load();
 }
 
+std::uint64_t OutputWorker::inputOverflowFrames() const
+{
+    return ringBuffer_ != nullptr ? ringBuffer_->overflowFrames() : 0;
+}
+
+std::uint64_t OutputWorker::bufferRecoveryCount() const
+{
+    return bufferRecoveryCount_.load();
+}
+
 double OutputWorker::streamLatencyMilliseconds() const
 {
     return static_cast<double>(streamLatencyHundredNanoseconds_.load()) / 10000.0;
@@ -408,9 +433,19 @@ int OutputWorker::targetBufferMilliseconds() const
     return targetBufferMilliseconds_.load();
 }
 
+double OutputWorker::targetBufferMillisecondsPrecise() const
+{
+    return targetBufferMillisecondsPrecise_.load();
+}
+
 int OutputWorker::acousticDelayMilliseconds() const
 {
     return acousticDelayMilliseconds_.load();
+}
+
+double OutputWorker::acousticDelayMillisecondsPrecise() const
+{
+    return acousticDelayMillisecondsPrecise_.load();
 }
 
 std::uint32_t OutputWorker::inputSampleRate() const
@@ -596,21 +631,24 @@ void OutputWorker::run()
                      "提交初始静音缓冲");
 
         checkHresult(audioClient->Start(), "启动输出流");
-        // IAudioClock 提供的是设备自己的帧位置和 QPC 位置，二者拟合后可测出硬件漂移。
+        // IAudioClock 的设备位置使用 GetFrequency() 返回的标度；QPC 位置固定为
+        // 100 ns 单位，并不是 QueryPerformanceCounter() 的原始 tick。
         ComPtr<IAudioClock> audioClock;
-        const bool hasAudioClock = SUCCEEDED(audioClient->GetService(IID_PPV_ARGS(&audioClock)));
-        LARGE_INTEGER qpcFrequency{};
-        const bool hasQpcFrequency = QueryPerformanceFrequency(&qpcFrequency)
-                                     && qpcFrequency.QuadPart > 0;
+        UINT64 audioClockFrequency = 0;
+        const bool hasAudioClock = SUCCEEDED(
+                                       audioClient->GetService(IID_PPV_ARGS(&audioClock)))
+                                   && SUCCEEDED(audioClock->GetFrequency(&audioClockFrequency))
+                                   && audioClockFrequency > 0;
         clockModelReady_ = false;
         clockDriftPpm_ = 0.0;
-        if (hasQpcFrequency) {
-            clockModel_.setQpcTicksPerSecond(static_cast<double>(qpcFrequency.QuadPart));
+        if (hasAudioClock) {
+            constexpr double qpcHundredNanosecondsPerSecond = 10'000'000.0;
+            clockModel_.setQpcTicksPerSecond(qpcHundredNanosecondsPerSecond);
         } else {
             clockModel_.reset();
         }
         auto sampleAudioClock = [&]() {
-            if (!hasAudioClock || !hasQpcFrequency) {
+            if (!hasAudioClock) {
                 return;
             }
             UINT64 devicePosition = 0;
@@ -621,7 +659,8 @@ void OutputWorker::run()
             }
             clockModel_.addSample(devicePosition, qpcPosition);
             if (clockModel_.ready()) {
-                const double ppm = clockModel_.driftPpm(renderFormat.sampleRate);
+                const double ppm = clockModel_.driftPpm(
+                    static_cast<double>(audioClockFrequency));
                 if (std::isfinite(ppm)) {
                     clockDriftPpm_ = ppm;
                     clockModelReady_ = true;
@@ -647,9 +686,11 @@ void OutputWorker::run()
         std::vector<float> conversionBuffer;
         std::vector<BYTE> rawInputBuffer;
         const PolyphaseResampler resampler(inputFormat.channels);
+        // 转换缓存允许短时抖动，但必须有硬上限，避免异常调度导致内存持续增长。
+        const std::size_t maximumConversionFrames = std::max<std::size_t>(
+            static_cast<std::size_t>(inputFormat.sampleRate) * 2,
+            static_cast<std::size_t>(PolyphaseResampler::kHalfTaps) * 8);
         double sourcePosition = 0.0;
-        double smoothedClockCorrection = 0.0;
-        bool hasClockCorrection = false;
         std::uint64_t observedOverflowFrames = ringBuffer_->overflowFrames();
         const double nominalRatio = static_cast<double>(inputFormat.sampleRate)
                                     / static_cast<double>(renderFormat.sampleRate);
@@ -664,18 +705,6 @@ void OutputWorker::run()
             }
 
             sampleAudioClock();
-            const double rawClockCorrection = clockModelReady_.load()
-                                                  ? std::clamp(-clockDriftPpm_.load() * 1.0e-6,
-                                                               -0.0005,
-                                                               0.0005)
-                                                  : 0.0;
-            if (clockModelReady_.load()) {
-                smoothedClockCorrection = hasClockCorrection
-                                               ? smoothedClockCorrection * 0.98
-                                                     + rawClockCorrection * 0.02
-                                               : rawClockCorrection;
-                hasClockCorrection = true;
-            }
 
             UINT32 writableFrames = endpointBufferFrames;
             if (!exclusiveMode) {
@@ -695,6 +724,7 @@ void OutputWorker::run()
                 playbackStarted_ = false;
                 conversionBuffer.clear();
                 sourcePosition = 0.0;
+                ++bufferRecoveryCount_;
                 observedOverflowFrames = currentOverflowFrames;
                 report(QStringLiteral("输出设备发生缓冲溢出，正在重新建立同步缓冲：%1")
                            .arg(device_.name));
@@ -703,15 +733,18 @@ void OutputWorker::run()
             BYTE* target = nullptr;
             checkHresult(renderClient->GetBuffer(writableFrames, &target), "获取可写输出缓冲");
 
-            const std::size_t targetBufferFrames = targetBufferFrames_.load();
+            const double targetBufferFrames = targetBufferFramesPrecise_.load();
             const std::size_t sourceFramesPerPass = static_cast<std::size_t>(
                                                         std::ceil(writableFrames * nominalRatio))
                                                     + 2;
-            const std::size_t minimumStartupFrames = targetBufferFrames
+            const std::size_t minimumStartupFrames = static_cast<std::size_t>(
+                                                          std::ceil(targetBufferFrames))
                                                      + sourceFramesPerPass;
             if (!playbackStarted_
                 && ringBuffer_->availableFrames() >= minimumStartupFrames) {
                 playbackStarted_ = true;
+                // 让首个输出块保留目标缓冲的小数帧，避免延迟被强制量化到整帧。
+                sourcePosition = std::ceil(targetBufferFrames) - targetBufferFrames;
                 report(QStringLiteral("输出设备缓冲就绪：%1（%2 ms）")
                            .arg(device_.name)
                            .arg(targetBufferMilliseconds_.load()));
@@ -721,12 +754,12 @@ void OutputWorker::run()
             if (playbackStarted_) {
                 const std::size_t conversionFrames = conversionBuffer.size()
                                                      / inputFormat.channels;
-                const std::size_t bufferedFrames = ringBuffer_->availableFrames()
-                                                   + conversionFrames
-                                                   - std::min<std::size_t>(
-                                                       conversionFrames,
-                                                       static_cast<std::size_t>(sourcePosition));
-                const double desiredBufferedFrames = static_cast<double>(targetBufferFrames)
+                const double bufferedFrames = static_cast<double>(
+                                                  ringBuffer_->availableFrames())
+                                             + static_cast<double>(conversionFrames)
+                                             - std::min(static_cast<double>(conversionFrames),
+                                                        sourcePosition);
+                const double desiredBufferedFrames = targetBufferFrames
                                                      + writableFrames * nominalRatio;
                 const double errorFrames = static_cast<double>(bufferedFrames)
                                            - desiredBufferedFrames;
@@ -742,9 +775,14 @@ void OutputWorker::run()
                            * correctionTimeSeconds),
                     -correctionLimit,
                     correctionLimit);
-                // 时钟漂移是前馈修正，缓冲水位仍负责处理启动、暂停和突发调度延迟。
-                const double combinedCorrection = std::clamp(
-                    smoothedClockCorrection + ratioCorrection, -0.05, 0.05);
+                // IAudioClock 只描述输出相对 QPC 的漂移，未扣除 Loopback 捕获源
+                // 自身时钟前不能直接作为 ASRC 前馈。先仅用于诊断，速率由相对
+                // 缓冲水位闭环控制，避免绝对时钟误差被重复补偿。
+                // 校准扫频必须保持已知的时间规律；若根据预送缓冲量改变速率，ESS
+                // 会与反卷积参考失配。普通节目播放仍使用缓冲水位闭环。
+                const double combinedCorrection = adaptiveRateControl_
+                                                      ? ratioCorrection
+                                                      : 0.0;
                 const double effectiveRatio = nominalRatio * (1.0 + combinedCorrection);
 
                 const double finalSourcePosition = sourcePosition
@@ -755,7 +793,16 @@ void OutputWorker::run()
                                                    + PolyphaseResampler::kHalfTaps + 1;
                 std::size_t currentConversionFrames = conversionBuffer.size()
                                                       / inputFormat.channels;
-                if (currentConversionFrames < requiredFrames) {
+                if (currentConversionFrames > maximumConversionFrames
+                    || requiredFrames > maximumConversionFrames) {
+                    conversionBuffer.clear();
+                    sourcePosition = 0.0;
+                    playbackStarted_ = false;
+                    ++bufferRecoveryCount_;
+                    currentConversionFrames = 0;
+                    report(QStringLiteral("输出转换缓存达到安全上限，已清空并重新缓冲：%1")
+                               .arg(device_.name));
+                } else if (currentConversionFrames < requiredFrames) {
                     const std::size_t requestedInputFrames = requiredFrames
                                                              - currentConversionFrames;
                     rawInputBuffer.resize(requestedInputFrames * inputFormat.bytesPerFrame);
@@ -858,6 +905,7 @@ void OutputWorker::run()
                         playbackStarted_ = false;
                         conversionBuffer.clear();
                         sourcePosition = 0.0;
+                        ++bufferRecoveryCount_;
                     }
                 }
             }

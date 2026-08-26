@@ -98,6 +98,18 @@ std::uint64_t RemoteMicrophoneBuffer::latestFrameIndex() const
     return nextFrameIndex_;
 }
 
+std::size_t RemoteMicrophoneBuffer::bufferedFrames() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return samples_.size();
+}
+
+std::uint64_t RemoteMicrophoneBuffer::trimmedFrames() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return trimmedFrames_;
+}
+
 bool RemoteMicrophoneBuffer::waitUntilFrame(std::uint64_t frameIndex,
                                             std::chrono::milliseconds timeout,
                                             const std::atomic_bool* cancellation)
@@ -143,5 +155,6 @@ void RemoteMicrophoneBuffer::trimLocked()
     while (samples_.size() > maximumFrames) {
         samples_.pop_front();
         ++firstFrameIndex_;
+        ++trimmedFrames_;
     }
 }

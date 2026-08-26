@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectDir = (Resolve-Path -LiteralPath (Split-Path -Parent $MyInvocation.MyCommand.Path)).Path
-$buildDir = Join-Path $projectDir 'build'
+$buildDir = Join-Path $projectDir 'build-msvc-v100'
 $packageDir = if ([System.IO.Path]::IsPathRooted($PackageDir)) {
     $PackageDir
 } else {
@@ -52,13 +52,17 @@ Import-MsvcEnvironment
 
 $cmake = (Get-Command cmake.exe -ErrorAction Stop).Source
 $ninja = (Get-Command ninja.exe -ErrorAction Stop).Source
+$compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+$cmakeCompiler = $compiler.Replace('\', '/')
 Write-Host '=== VoiceSpreader Build ===' -ForegroundColor Cyan
 Write-Host "Project: $projectDir"
 Write-Host "Qt: $QtRoot"
 Write-Host "CMake: $cmake"
 Write-Host "Ninja: $ninja"
+Write-Host "Compiler: $compiler"
 
-& $cmake -S $projectDir -B $buildDir -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$QtRoot"
+& $cmake -S $projectDir -B $buildDir -G Ninja -DCMAKE_BUILD_TYPE=Release `
+    "-DCMAKE_CXX_COMPILER=$cmakeCompiler" "-DCMAKE_PREFIX_PATH=$QtRoot"
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configuration failed with exit code: $LASTEXITCODE"
 }

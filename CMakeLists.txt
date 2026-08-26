@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(VoiceSpreader VERSION 0.1.0 LANGUAGES CXX)
+project(VoiceSpreader VERSION 1.0.0 LANGUAGES CXX)
 
 include(CTest)
 
@@ -23,10 +23,14 @@ set(VOICESPREADER_SOURCES
     src/frame_ring_buffer.h
     src/audio_clock_model.cpp
     src/audio_clock_model.h
+    src/sampling_rate_offset_estimator.cpp
+    src/sampling_rate_offset_estimator.h
     src/polyphase_resampler.cpp
     src/polyphase_resampler.h
     src/calibration_signal.cpp
     src/calibration_signal.h
+    src/acoustic_alignment.cpp
+    src/acoustic_alignment.h
     src/latency_calibrator.cpp
     src/latency_calibrator.h
     src/acoustic_drift_tracker.cpp
@@ -124,6 +128,18 @@ if(BUILD_TESTING)
     target_link_libraries(PhonePairingServerTest PRIVATE Qt5::Network)
     add_test(NAME PhonePairingServerTest COMMAND PhonePairingServerTest)
 
+    add_executable(RemoteMicrophoneBufferTest
+        tests/remote_microphone_buffer_test.cpp
+        src/remote_microphone_buffer.cpp
+        src/remote_microphone_buffer.h
+        src/audio_clock_model.cpp
+        src/audio_clock_model.h
+    )
+    if(MSVC)
+        target_compile_options(RemoteMicrophoneBufferTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME RemoteMicrophoneBufferTest COMMAND RemoteMicrophoneBufferTest)
+
     add_executable(AudioClockModelTest
         tests/audio_clock_model_test.cpp
         src/audio_clock_model.cpp
@@ -133,6 +149,26 @@ if(BUILD_TESTING)
         target_compile_options(AudioClockModelTest PRIVATE /W4 /permissive- /utf-8)
     endif()
     add_test(NAME AudioClockModelTest COMMAND AudioClockModelTest)
+
+    add_executable(SamplingRateOffsetEstimatorTest
+        tests/sampling_rate_offset_estimator_test.cpp
+        src/sampling_rate_offset_estimator.cpp
+        src/sampling_rate_offset_estimator.h
+    )
+    if(MSVC)
+        target_compile_options(SamplingRateOffsetEstimatorTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME SamplingRateOffsetEstimatorTest COMMAND SamplingRateOffsetEstimatorTest)
+
+    add_executable(AcousticAlignmentTest
+        tests/acoustic_alignment_test.cpp
+        src/acoustic_alignment.cpp
+        src/acoustic_alignment.h
+    )
+    if(MSVC)
+        target_compile_options(AcousticAlignmentTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME AcousticAlignmentTest COMMAND AcousticAlignmentTest)
 
     add_executable(PolyphaseResamplerTest
         tests/polyphase_resampler_test.cpp

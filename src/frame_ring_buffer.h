@@ -17,6 +17,7 @@ public:
     std::size_t skip(std::size_t frameCount);
     void clear();
     std::size_t availableFrames() const;
+    std::size_t capacityFrames() const;
     std::uint64_t overflowFrames() const;
 
 private:

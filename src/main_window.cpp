@@ -1184,8 +1184,16 @@ void MainWindow::applyCalibrationResults()
         ++appliedCount;
     }
 
+    if (appliedCount > 0 && automaticLatencyCheck_->isChecked()) {
+        // 声学校准已经包含端点、扬声器和空气传播的总路径差异，不能再叠加
+        // Windows 端点报告的静态流延迟，否则可能反向延迟原本较慢的设备。
+        automaticLatencyCheck_->setChecked(false);
+        appendStatus(QStringLiteral(
+            "已关闭端点自动补偿：声学校准结果已包含完整播放路径，避免重复或反向补偿"));
+    }
+
     calibrationHintLabel_->setText(
-        QStringLiteral("校准完成：已向 %1 台设备回填相对延迟补偿，可直接开始同步。")
+        QStringLiteral("校准完成：已向 %1 台设备回填相对延迟补偿，并避免叠加端点自动补偿。")
             .arg(appliedCount));
     calibrationHintLabel_->setVisible(true);
 }

@@ -1,8 +1,10 @@
 #include "acoustic_drift_tracker.h"
 
+#include "acoustic_alignment.h"
 #include "calibration_signal.h"
 #include "output_worker.h"
 #include "remote_microphone_buffer.h"
+#include "sampling_rate_offset_estimator.h"
 #include "wasapi_helpers.h"
 
 #include <Windows.h>
@@ -32,6 +34,8 @@ constexpr double maximumRemoteMeasuredLatencySeconds = 1.5;
 constexpr double maximumLocalMeasuredLatencySeconds = 1.5;
 constexpr double minimumAcceptedRelativeLatencySeconds = -0.020;
 constexpr double minimumProbeConfidence = 0.08;
+constexpr double minimumCorrectionConfidence = 0.12;
+constexpr double maximumUnderlyingHistorySpreadMilliseconds = 8.0;
 
 struct CoTaskMemWaveFormatDeleter
 {
@@ -149,11 +153,11 @@ struct TrackerState
     float spreadAmplitude = 0.0012F;
     int consecutiveFailures = 0;
     std::deque<double> underlyingLatencyHistory;
+    std::deque<double> confidenceHistory;
     bool measuredThisCycle = false;
     double lastConfidence = 0.0;
     double smoothedDriftPpm = 0.0;
-    double previousRelativeLatency = 0.0;
-    bool hasPreviousRelativeLatency = false;
+    SamplingRateOffsetEstimator driftEstimator{32, 5, 2'000.0};
     bool hasInitialAlignment = false;
 };
 
@@ -423,7 +427,7 @@ void AcousticDriftTracker::run()
             }
 
             const double captureSeconds = std::clamp(
-                state.output.worker->targetBufferMilliseconds() / 1000.0
+                state.output.worker->targetBufferMillisecondsPrecise() / 1000.0
                     + state.output.worker->streamLatencyMilliseconds() / 1000.0
                     + 0.55,
                 0.75,
@@ -474,17 +478,14 @@ void AcousticDriftTracker::run()
                 const double arrivalFrame = snapshot.firstFrameIndex
                                             + detection.arrivalSeconds
                                                   * snapshot.sampleRate;
-                // 手机帧号从本次录音的 0 开始，不能直接与 Windows QPC 相减。
-                // 使用探针开始后经过的手机采样帧数；网络延迟作为公共偏移保留，
-                // 在比较多个输出设备时可以抵消。
-                if (arrivalFrame < static_cast<double>(frameAtProbeStart)) {
-                    result.confidence = detection.confidence;
-                    return result;
-                }
+                // “电脑此刻最后收到的手机帧”包含 TCP 单向延迟，不能当作探针
+                // 开始时的捕获帧，否则网络抖动可能把两台设备的快慢判反。
+                // 绝对手机帧与探针 QPC 的未知时钟原点是公共项，设备间作差会抵消。
                 result.detected = true;
-                result.latencyMilliseconds = (arrivalFrame
-                                              - static_cast<double>(frameAtProbeStart))
-                                             * 1000.0 / snapshot.sampleRate;
+                result.latencyMilliseconds = calculateCrossClockArrivalCoordinateMilliseconds(
+                    static_cast<std::uint64_t>(std::llround(arrivalFrame)),
+                    static_cast<double>(captureFormat.sampleRate),
+                    probeStartQpc);
                 result.confidence = detection.confidence;
                 return result;
             }
@@ -541,7 +542,7 @@ void AcousticDriftTracker::run()
             return;
         }
 
-        auto previousCycleTime = std::chrono::steady_clock::now();
+        QString driftReferenceDeviceId;
         while (!stopRequested_) {
             for (TrackerState& state : states) {
                 state.measuredThisCycle = false;
@@ -560,10 +561,14 @@ void AcousticDriftTracker::run()
                     state.lastConfidence = measurement.confidence;
                     const double underlyingLatency = measurement.latencyMilliseconds
                                                      - state.output.worker
-                                                           ->acousticDelayMilliseconds();
+                                                           ->acousticDelayMillisecondsPrecise();
                     state.underlyingLatencyHistory.push_back(underlyingLatency);
+                    state.confidenceHistory.push_back(measurement.confidence);
                     while (state.underlyingLatencyHistory.size() > 3) {
                         state.underlyingLatencyHistory.pop_front();
+                    }
+                    while (state.confidenceHistory.size() > 3) {
+                        state.confidenceHistory.pop_front();
                     }
                     state.measuredThisCycle = true;
                     if (state.mode == ProbeMode::spreadSpectrum) {
@@ -618,63 +623,65 @@ void AcousticDriftTracker::run()
 
             std::vector<TrackerState*> validStates;
             for (TrackerState& state : states) {
+                const auto latencyRange = std::minmax_element(
+                    state.underlyingLatencyHistory.cbegin(),
+                    state.underlyingLatencyHistory.cend());
+                const double historySpread = state.underlyingLatencyHistory.empty()
+                                                 ? std::numeric_limits<double>::infinity()
+                                                 : *latencyRange.second - *latencyRange.first;
+                const double weakestConfidence = state.confidenceHistory.empty()
+                                                     ? 0.0
+                                                     : *std::min_element(
+                                                           state.confidenceHistory.cbegin(),
+                                                           state.confidenceHistory.cend());
                 if (state.measuredThisCycle
-                    && state.underlyingLatencyHistory.size() >= 3) {
+                    && state.underlyingLatencyHistory.size() >= 3
+                    && state.confidenceHistory.size() >= 3
+                    && weakestConfidence >= minimumCorrectionConfidence
+                    && historySpread <= maximumUnderlyingHistorySpreadMilliseconds) {
                     validStates.push_back(&state);
                 }
             }
 
             const auto now = std::chrono::steady_clock::now();
-            const double elapsedSeconds = std::max(
-                0.1,
-                std::chrono::duration<double>(now - previousCycleTime).count());
-            previousCycleTime = now;
             if (validStates.size() >= 2) {
-                double maximumObservedLatency = -std::numeric_limits<double>::infinity();
-                std::vector<double> observedLatencies;
-                observedLatencies.reserve(validStates.size());
+                std::vector<double> underlyingLatencies;
+                underlyingLatencies.reserve(validStates.size());
                 for (TrackerState* state : validStates) {
-                    const double observed = median(state->underlyingLatencyHistory)
-                                            + state->output.worker
-                                                  ->acousticDelayMilliseconds();
-                    observedLatencies.push_back(observed);
-                    maximumObservedLatency = std::max(maximumObservedLatency, observed);
+                    underlyingLatencies.push_back(median(state->underlyingLatencyHistory));
                 }
 
-                std::vector<double> desiredDelays;
-                desiredDelays.reserve(validStates.size());
-                double minimumDesiredDelay = std::numeric_limits<double>::infinity();
-                for (std::size_t index = 0; index < validStates.size(); ++index) {
-                    const double desired = validStates[index]->output.worker
-                                               ->acousticDelayMilliseconds()
-                                           + maximumObservedLatency
-                                           - observedLatencies[index];
-                    desiredDelays.push_back(desired);
-                    minimumDesiredDelay = std::min(minimumDesiredDelay, desired);
-                }
-                // 保留少量可回退余量，设备由慢变快时也能通过减少本层延迟追踪。
-                if (minimumDesiredDelay < 6.0) {
-                    for (double& desired : desiredDelays) {
-                        desired += 6.0 - minimumDesiredDelay;
+                // 目标只由扣除当前补偿后的固有延迟决定。使用当前最晚到达作为
+                // 下一轮目标会把误加延迟固化成基准，形成只能增加、不能回退的棘轮。
+                const std::vector<double> desiredDelays = calculateMinimalAcousticDelays(
+                    underlyingLatencies);
+                const double slowestUnderlyingLatency = *std::max_element(
+                    underlyingLatencies.cbegin(),
+                    underlyingLatencies.cend());
+
+                const double referenceUnderlying = underlyingLatencies.front();
+                const QString currentReferenceDeviceId = validStates.front()->output.device.id;
+                if (driftReferenceDeviceId != currentReferenceDeviceId) {
+                    // 参考设备改变会让相对延迟产生阶跃，旧的 SRO 斜率不能继续复用。
+                    for (TrackerState& state : states) {
+                        state.driftEstimator.reset();
+                        state.smoothedDriftPpm = 0.0;
                     }
+                    driftReferenceDeviceId = currentReferenceDeviceId;
                 }
-
-                const double referenceUnderlying = median(
-                    validStates.front()->underlyingLatencyHistory);
+                const double observationTimeSeconds = std::chrono::duration<double>(
+                    now.time_since_epoch()).count();
                 bool establishedInitialAlignment = false;
                 for (std::size_t index = 0; index < validStates.size(); ++index) {
                     TrackerState& state = *validStates[index];
-                    const int currentDelay = state.output.worker
-                                                 ->acousticDelayMilliseconds();
-                    int newDelay = currentDelay;
+                    const double currentDelay = state.output.worker
+                                                   ->acousticDelayMillisecondsPrecise();
+                    double newDelay = currentDelay;
                     if (!state.hasInitialAlignment) {
                         // 初始测量也必须限速，避免一次误检直接跳到数百毫秒。
-                        const int desired = std::clamp(
-                            static_cast<int>(std::lround(desiredDelays[index])),
-                            0,
-                            500);
-                        const int error = desired - currentDelay;
-                        constexpr int initialStepMilliseconds = 20;
+                        const double desired = std::clamp(desiredDelays[index], 0.0, 500.0);
+                        const double error = desired - currentDelay;
+                        constexpr double initialStepMilliseconds = 20.0;
                         if (std::abs(error) <= initialStepMilliseconds) {
                             newDelay = desired;
                             state.hasInitialAlignment = true;
@@ -684,38 +691,43 @@ void AcousticDriftTracker::run()
                                 currentDelay
                                     + (error > 0 ? initialStepMilliseconds
                                                  : -initialStepMilliseconds),
-                                0,
-                                500);
+                                0.0,
+                                500.0);
                         }
                     } else {
                         const double error = desiredDelays[index] - currentDelay;
-                        int step = 0;
-                        if (std::abs(error) >= 0.75) {
-                            step = std::clamp(
-                                static_cast<int>(std::lround(error)), -2, 2);
+                        double step = 0.0;
+                        if (std::abs(error) >= 0.15) {
+                            step = std::clamp(error, -0.5, 0.5);
                         }
-                        newDelay = std::clamp(currentDelay + step, 0, 500);
+                        newDelay = std::clamp(currentDelay + step, 0.0, 500.0);
                     }
-                    state.output.worker->setAcousticDelayMilliseconds(newDelay);
+                    state.output.worker->setAcousticDelayMillisecondsPrecise(newDelay);
 
-                    const double relativeUnderlying = median(
-                                                          state.underlyingLatencyHistory)
+                    const double relativeUnderlying = underlyingLatencies[index]
                                                       - referenceUnderlying;
-                    if (state.hasPreviousRelativeLatency) {
-                        const double instantaneousPpm = (relativeUnderlying
-                                                         - state.previousRelativeLatency)
-                                                        / elapsedSeconds * 1000.0;
-                        state.smoothedDriftPpm = state.smoothedDriftPpm * 0.75
-                                                 + instantaneousPpm * 0.25;
+                    const double driftConfidence = std::min(
+                        state.lastConfidence,
+                        validStates.front()->lastConfidence);
+                    state.driftEstimator.addSample(observationTimeSeconds,
+                                                   relativeUnderlying / 1000.0,
+                                                   driftConfidence);
+                    if (state.driftEstimator.ready()) {
+                        state.smoothedDriftPpm = state.driftEstimator.driftPpm();
                     }
-                    state.previousRelativeLatency = relativeUnderlying;
-                    state.hasPreviousRelativeLatency = true;
                     if (correctionCallback_) {
+                        const QString diagnosticMode = modeName(state.mode)
+                                                       + QStringLiteral("，路径差 %1 ms")
+                                                             .arg(underlyingLatencies[index]
+                                                                      - slowestUnderlyingLatency,
+                                                                  0,
+                                                                  'f',
+                                                                  1);
                         correctionCallback_(state.output.device.id,
-                                            newDelay,
+                                            static_cast<int>(std::lround(newDelay)),
                                             state.smoothedDriftPpm,
-                                            modeName(state.mode),
-                                             state.lastConfidence);
+                                            diagnosticMode,
+                                            state.lastConfidence);
                     }
                 }
                 if (establishedInitialAlignment && statusCallback_) {

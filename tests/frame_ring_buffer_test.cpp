@@ -51,7 +51,8 @@ bool testOverflowKeepsNewestFrames()
     buffer.write(second.data(), second.size(), false);
 
     std::array<BYTE, 4> output{};
-    return buffer.overflowFrames() == 2
+    return buffer.capacityFrames() == 4
+           && buffer.overflowFrames() == 2
            && buffer.read(output.data(), output.size()) == output.size()
            && equals(output, std::array<BYTE, 4>{3, 4, 5, 6});
 }

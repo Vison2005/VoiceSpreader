@@ -267,7 +267,8 @@ void AudioEngine::run(AudioDevice captureSource,
                 preferExclusiveOutputs,
                 [this](const QString& message) {
                     emit statusChanged(message);
-                });
+                },
+                true);
             {
                 std::lock_guard<std::mutex> lock(activeWorkersMutex_);
                 worker->setManualDelayMilliseconds(
@@ -480,10 +481,12 @@ void AudioEngine::run(AudioDevice captureSource,
             if (!worker->initializedSuccessfully()) {
                 continue;
             }
-            emit statusChanged(QStringLiteral("同步统计：%1，时钟修正 %2 帧，欠载 %3 帧")
+            emit statusChanged(QStringLiteral("同步统计：%1，时钟修正 %2 帧，欠载 %3 帧，输入溢出 %4 帧，缓存恢复 %5 次")
                                    .arg(outputDevices.at(index).device.name)
                                    .arg(worker->correctedFrames())
-                                   .arg(worker->underrunFrames()));
+                                   .arg(worker->underrunFrames())
+                                   .arg(worker->inputOverflowFrames())
+                                   .arg(worker->bufferRecoveryCount()));
         }
     } catch (const std::exception& exception) {
         if (acousticTracker) {

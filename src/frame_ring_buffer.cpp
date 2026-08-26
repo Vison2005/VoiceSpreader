@@ -102,6 +102,11 @@ std::size_t FrameRingBuffer::availableFrames() const
     return availableFrames_;
 }
 
+std::size_t FrameRingBuffer::capacityFrames() const
+{
+    return capacityFrames_;
+}
+
 std::uint64_t FrameRingBuffer::overflowFrames() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

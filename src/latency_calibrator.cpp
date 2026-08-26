@@ -29,22 +29,52 @@ constexpr std::uint32_t calibrationSampleRate = 48000;
 constexpr std::size_t calibrationChannels = 2;
 constexpr std::size_t chunkFrames = 480;
 constexpr double preambleSeconds = 0.50;
-constexpr double deviceSlotSeconds = 0.55;
-constexpr double postambleSeconds = 0.80;
-constexpr double captureTailSeconds = 0.60;
-constexpr int calibrationRepetitions = 3;
+constexpr double sweepDurationSeconds = 0.80;
+constexpr double sweepStartFrequencyHz = 100.0;
+constexpr double sweepEndFrequencyHz = 18000.0;
+constexpr double deviceSlotSeconds = 2.00;
+constexpr double postambleSeconds = 1.50;
+constexpr double captureTailSeconds = 0.20;
+constexpr int calibrationRepetitions = 2;
+constexpr float sweepAmplitude = 0.18F;
+constexpr double maximumMeasuredLatencySeconds = 1.20;
+constexpr double maximumRepeatSpreadMilliseconds = 2.0;
 
-double median(std::vector<double> values)
+QString detectionStatusText(ProbeDetectionStatus status)
 {
-    if (values.empty()) {
-        return 0.0;
+    switch (status) {
+    case ProbeDetectionStatus::Detected:
+        return QStringLiteral("通过");
+    case ProbeDetectionStatus::LowConfidence:
+        return QStringLiteral("峰值置信度不足");
+    case ProbeDetectionStatus::NoUsableEnergy:
+        return QStringLiteral("反卷积后无有效能量");
+    case ProbeDetectionStatus::RecordingTooShort:
+        return QStringLiteral("录音长度不足");
+    case ProbeDetectionStatus::InvalidInput:
+        return QStringLiteral("检测输入无效");
     }
-    std::sort(values.begin(), values.end());
-    const std::size_t middle = values.size() / 2;
-    if ((values.size() % 2) != 0) {
-        return values[middle];
+    return QStringLiteral("未知状态");
+}
+
+double recordingPeakDbfs(const std::vector<float>& recording,
+                         std::uint32_t sampleRate,
+                         double firstSeconds,
+                         double lastSeconds)
+{
+    const std::size_t firstFrame = std::min<std::size_t>(
+        recording.size(),
+        static_cast<std::size_t>(std::max(0.0, firstSeconds) * sampleRate));
+    const std::size_t lastFrame = std::min<std::size_t>(
+        recording.size(),
+        static_cast<std::size_t>(std::max(0.0, lastSeconds) * sampleRate));
+    float peak = 0.0F;
+    for (std::size_t frame = firstFrame; frame < lastFrame; ++frame) {
+        peak = std::max(peak, std::abs(recording[frame]));
     }
-    return (values[middle - 1] + values[middle]) * 0.5;
+    return peak > std::numeric_limits<float>::epsilon()
+               ? 20.0 * std::log10(static_cast<double>(peak))
+               : -120.0;
 }
 
 struct CaptureFormat
@@ -256,7 +286,8 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
                 false,
                 [this](const QString& message) {
                     emit statusChanged(message);
-                });
+                },
+                false);
             worker->start();
             if (worker->waitUntilInitialized(std::chrono::seconds(5))) {
                 activeDevices.push_back(device);
@@ -275,15 +306,41 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
             throw std::runtime_error("至少需要两个输出设备成功启动才能进行相对校准");
         }
 
-        const std::vector<float> probe = generateCalibrationProbe(calibrationSampleRate);
+        const double captureSweepEndFrequency = std::min(
+            sweepEndFrequencyHz,
+            static_cast<double>(captureFormat.sampleRate) * 0.45);
+        const std::vector<float> outputSweep = generateExponentialSineSweep(
+            calibrationSampleRate,
+            sweepDurationSeconds,
+            sweepStartFrequencyHz,
+            captureSweepEndFrequency);
+        const std::vector<float> captureReferenceSweep = generateExponentialSineSweep(
+            captureFormat.sampleRate,
+            sweepDurationSeconds,
+            sweepStartFrequencyHz,
+            captureSweepEndFrequency);
+        if (outputSweep.empty() || captureReferenceSweep.empty()) {
+            throw std::runtime_error("无法为当前输出或麦克风采样率生成 ESS 扫频");
+        }
+
+        // 先正序、再逆序逐设备测量。每台设备两次测量的平均发送时刻相同，
+        // 可以抵消播放与录音异步时钟造成的一阶线性时间漂移。
+        std::vector<std::size_t> sweepDeviceOrder;
+        sweepDeviceOrder.reserve(static_cast<std::size_t>(activeDevices.size())
+                                 * calibrationRepetitions);
+        for (std::size_t index = 0; index < workers.size(); ++index) {
+            sweepDeviceOrder.push_back(index);
+        }
+        for (std::size_t index = workers.size(); index > 0; --index) {
+            sweepDeviceOrder.push_back(index - 1);
+        }
         const std::size_t preambleFrames = static_cast<std::size_t>(
             std::llround(preambleSeconds * calibrationSampleRate));
         const std::size_t slotFrames = static_cast<std::size_t>(
             std::llround(deviceSlotSeconds * calibrationSampleRate));
         const std::size_t postambleFrames = static_cast<std::size_t>(
             std::llround(postambleSeconds * calibrationSampleRate));
-        const std::size_t slotCount = static_cast<std::size_t>(activeDevices.size())
-                                      * calibrationRepetitions;
+        const std::size_t slotCount = sweepDeviceOrder.size();
         const std::size_t totalTimelineFrames = preambleFrames
                                                 + slotFrames * slotCount
                                                 + postambleFrames;
@@ -304,23 +361,23 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
             for (std::size_t deviceIndex = 0; deviceIndex < workers.size(); ++deviceIndex) {
                 auto& chunk = outputChunks[deviceIndex];
                 std::fill(chunk.begin(), chunk.end(), 0.0F);
-                for (int repetition = 0;
-                     repetition < calibrationRepetitions;
-                     ++repetition) {
-                    const std::size_t slotIndex = static_cast<std::size_t>(repetition)
-                                                      * workers.size()
-                                                  + deviceIndex;
+                for (std::size_t slot = 0; slot < sweepDeviceOrder.size(); ++slot) {
+                    if (sweepDeviceOrder[slot] != deviceIndex) {
+                        continue;
+                    }
                     const std::size_t probeStart = preambleFrames
-                                                   + slotIndex * slotFrames;
+                                                   + slot * slotFrames;
                     for (std::size_t frame = 0; frame < framesThisChunk; ++frame) {
                         const std::size_t absoluteFrame = timelineFrame + frame;
                         if (absoluteFrame < probeStart
-                            || absoluteFrame >= probeStart + probe.size()) {
+                            || absoluteFrame >= probeStart
+                                                   + outputSweep.size()) {
                             continue;
                         }
-                        const float value = probe[absoluteFrame - probeStart];
-                        chunk[frame * calibrationChannels] = value;
-                        chunk[frame * calibrationChannels + 1] = value;
+                        const float value = outputSweep[absoluteFrame - probeStart]
+                                            * sweepAmplitude;
+                        chunk[frame * calibrationChannels] += value;
+                        chunk[frame * calibrationChannels + 1] += value;
                     }
                 }
                 workers[deviceIndex]->push(
@@ -373,7 +430,7 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
         checkHresult(captureAudioClient->Start(), "启动麦克风捕获");
         captureStarted = true;
         emit statusChanged(
-            QStringLiteral("声学校准开始：请保持环境安静，将对 %1 台设备各测量 %2 次")
+            QStringLiteral("ESS 声学校准开始：%1 台设备将依次正反序扫频，各测量 %2 次")
                 .arg(activeDevices.size())
                 .arg(calibrationRepetitions));
 
@@ -423,49 +480,97 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
             int detectedCount = 0;
 
             for (int index = 0; index < activeDevices.size(); ++index) {
-                std::vector<double> latencyMeasurements;
-                std::vector<double> confidenceMeasurements;
-                latencyMeasurements.reserve(calibrationRepetitions);
-                confidenceMeasurements.reserve(calibrationRepetitions);
+                std::vector<SweepImpulseResponseAnalysis> analyses;
+                analyses.reserve(calibrationRepetitions);
+                int measurementNumber = 0;
 
-                for (int repetition = 0;
-                     repetition < calibrationRepetitions;
-                     ++repetition) {
-                    const int slotIndex = repetition * activeDevices.size() + index;
+                for (std::size_t slot = 0; slot < sweepDeviceOrder.size(); ++slot) {
+                    if (sweepDeviceOrder[slot] != static_cast<std::size_t>(index)) {
+                        continue;
+                    }
+                    ++measurementNumber;
                     const double expectedStartSeconds = preambleSeconds
-                                                        + slotIndex * deviceSlotSeconds;
-                    const ProbeDetection detection = detectCalibrationProbe(
+                                                        + slot * deviceSlotSeconds;
+                    SweepImpulseResponseAnalysis analysis =
+                        analyzeExponentialSweepImpulseResponse(
                         microphoneRecording,
                         captureFormat.sampleRate,
-                        expectedStartSeconds);
-                    if (detection.detected) {
-                        latencyMeasurements.push_back(detection.relativeDelaySeconds
-                                                      * 1000.0);
-                        confidenceMeasurements.push_back(detection.confidence);
-                    }
+                        captureReferenceSweep,
+                        expectedStartSeconds,
+                        0.05,
+                        maximumMeasuredLatencySeconds);
+                    const auto strongestPeak = std::max_element(
+                        analysis.peaks.cbegin(),
+                        analysis.peaks.cend(),
+                        [](const ImpulseResponsePeak& left,
+                           const ImpulseResponsePeak& right) {
+                            return left.relativeToStrongest < right.relativeToStrongest;
+                        });
+                    const double peakDbfs = recordingPeakDbfs(
+                        microphoneRecording,
+                        captureFormat.sampleRate,
+                        expectedStartSeconds,
+                        expectedStartSeconds + sweepDurationSeconds
+                            + maximumMeasuredLatencySeconds);
+                    emit statusChanged(
+                        QStringLiteral(
+                            "ESS 诊断：%1，第 %2 轮，录音峰值 %3 dBFS，候选 %4 个，主峰 IR %5 ms、SNR %6 dB，%7")
+                            .arg(activeDevices.at(index).name)
+                            .arg(measurementNumber)
+                            .arg(peakDbfs, 0, 'f', 1)
+                            .arg(analysis.peaks.size())
+                            .arg(strongestPeak != analysis.peaks.cend()
+                                     ? strongestPeak->delaySeconds * 1000.0
+                                     : 0.0,
+                                 0,
+                                 'f',
+                                 2)
+                            .arg(strongestPeak != analysis.peaks.cend()
+                                     ? strongestPeak->signalToNoiseDb
+                                     : 0.0,
+                                 0,
+                                 'f',
+                                 1)
+                            .arg(detectionStatusText(analysis.status)));
+                    analyses.push_back(std::move(analysis));
                 }
 
                 LatencyCalibrationResult result;
                 result.device = activeDevices.at(index);
-                result.detected = latencyMeasurements.size() >= 2;
-                result.measuredLatencyMilliseconds = median(latencyMeasurements);
-                result.confidence = median(confidenceMeasurements);
+                ProbeDetection consistentDetection;
+                if (analyses.size() == calibrationRepetitions) {
+                    consistentDetection = selectConsistentImpulseResponsePeakPair(
+                        analyses[0],
+                        analyses[1],
+                        maximumRepeatSpreadMilliseconds / 1000.0);
+                }
+                result.detected = consistentDetection.detected;
+                result.measuredLatencyMilliseconds =
+                    consistentDetection.relativeDelaySeconds * 1000.0;
+                result.confidence = consistentDetection.confidence;
                 if (result.detected) {
                     ++detectedCount;
                     maximumLatencyMilliseconds = std::max(maximumLatencyMilliseconds,
                                                           result.measuredLatencyMilliseconds);
                 }
                 emit statusChanged(
-                    QStringLiteral("校准采样：%1，有效 %2/%3 次")
+                    QStringLiteral("ESS 一致峰匹配：%1，%2，时延 %3 ms，两轮差 %4 ms")
                         .arg(result.device.name)
-                        .arg(latencyMeasurements.size())
-                        .arg(calibrationRepetitions));
+                        .arg(result.detected ? QStringLiteral("通过")
+                                             : QStringLiteral("未找到一致峰对"))
+                        .arg(result.measuredLatencyMilliseconds, 0, 'f', 2)
+                        .arg(result.detected
+                                 ? consistentDetection.consistencySpreadSeconds * 1000.0
+                                 : -1.0,
+                             0,
+                             'f',
+                             2));
                 measuredResults.push_back(result);
             }
 
             if (detectedCount < 2) {
                 throw std::runtime_error(
-                    "有效探测结果不足两个；请提高扬声器音量、选择正确麦克风并保持环境安静");
+                    "至少两台设备未找到跨轮一致的脉冲峰；请查看 ESS 诊断中的录音峰值、候选数和主峰位置");
             }
 
             for (LatencyCalibrationResult& result : measuredResults) {
