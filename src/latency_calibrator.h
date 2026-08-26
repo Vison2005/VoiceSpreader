@@ -27,6 +27,7 @@ public:
     ~LatencyCalibrator() override;
 
     bool start(const AudioDevice& microphone, const QVector<AudioDevice>& outputDevices);
+    void requestStop();
     void stop();
     bool isActive() const;
     QVector<LatencyCalibrationResult> results() const;
@@ -35,7 +36,7 @@ signals:
     void statusChanged(const QString& message);
     void errorOccurred(const QString& message);
     void runningChanged(bool running);
-    void finished();
+    void finished(bool cancelled, bool failed);
 
 private:
     void run(AudioDevice microphone, QVector<AudioDevice> outputDevices);

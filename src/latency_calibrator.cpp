@@ -199,10 +199,15 @@ bool LatencyCalibrator::start(const AudioDevice& microphone,
 
 void LatencyCalibrator::stop()
 {
-    stopRequested_ = true;
+    requestStop();
     if (thread_.joinable()) {
         thread_.join();
     }
+}
+
+void LatencyCalibrator::requestStop()
+{
+    stopRequested_ = true;
 }
 
 bool LatencyCalibrator::isActive() const
@@ -221,6 +226,7 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
     std::vector<std::unique_ptr<OutputWorker>> workers;
     ComPtr<IAudioClient> captureAudioClient;
     bool captureStarted = false;
+    bool failed = false;
 
     try {
         ComInitializer com(COINIT_MULTITHREADED);
@@ -480,11 +486,17 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
             int detectedCount = 0;
 
             for (int index = 0; index < activeDevices.size(); ++index) {
+                if (stopRequested_) {
+                    throw std::runtime_error("calibration cancelled");
+                }
                 std::vector<SweepImpulseResponseAnalysis> analyses;
                 analyses.reserve(calibrationRepetitions);
                 int measurementNumber = 0;
 
                 for (std::size_t slot = 0; slot < sweepDeviceOrder.size(); ++slot) {
+                    if (stopRequested_) {
+                        throw std::runtime_error("calibration cancelled");
+                    }
                     if (sweepDeviceOrder[slot] != static_cast<std::size_t>(index)) {
                         continue;
                     }
@@ -574,6 +586,9 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
             }
 
             for (LatencyCalibrationResult& result : measuredResults) {
+                if (stopRequested_) {
+                    throw std::runtime_error("calibration cancelled");
+                }
                 if (!result.detected) {
                     continue;
                 }
@@ -594,7 +609,6 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
                 std::lock_guard<std::mutex> lock(resultsMutex_);
                 results_ = measuredResults;
             }
-            emit finished();
         }
     } catch (const std::exception& exception) {
         if (captureStarted && captureAudioClient != nullptr) {
@@ -604,10 +618,12 @@ void LatencyCalibrator::run(AudioDevice microphone, QVector<AudioDevice> outputD
             worker->stop();
         }
         if (!stopRequested_) {
+            failed = true;
             emit errorOccurred(QString::fromUtf8(exception.what()));
         }
     }
 
     active_ = false;
     emit runningChanged(false);
+    emit finished(stopRequested_.load(), failed);
 }

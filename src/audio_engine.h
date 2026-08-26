@@ -49,6 +49,8 @@ signals:
     void programLevelChanged(double levelDbfs, bool probeAllowed);
 
 private:
+    void applyRequestedOutputDelaysLocked();
+
     void run(AudioDevice captureSource,
              QVector<OutputDeviceSettings> outputDevices,
              bool preferExclusiveOutputs,

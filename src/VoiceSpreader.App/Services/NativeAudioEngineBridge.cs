@@ -43,9 +43,38 @@ public sealed class ProgramLevelEventArgs(double levelDbfs, bool probeAllowed) :
     public bool ProbeAllowed { get; } = probeAllowed;
 }
 
-public sealed class CalibrationCompletedEventArgs(IReadOnlyList<CalibrationResult> results) : EventArgs
+public enum CalibrationOutcome
+{
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+public sealed class CalibrationCompletedEventArgs(
+    IReadOnlyList<CalibrationResult> results,
+    CalibrationOutcome outcome) : EventArgs
 {
     public IReadOnlyList<CalibrationResult> Results { get; } = results;
+
+    public CalibrationOutcome Outcome { get; } = outcome;
+}
+
+public sealed class AcousticCorrectionEventArgs(
+    string deviceId,
+    int delayMilliseconds,
+    double driftPpm,
+    string probeMode,
+    double confidence) : EventArgs
+{
+    public string DeviceId { get; } = deviceId;
+
+    public int DelayMilliseconds { get; } = delayMilliseconds;
+
+    public double DriftPpm { get; } = driftPpm;
+
+    public string ProbeMode { get; } = probeMode;
+
+    public double Confidence { get; } = confidence;
 }
 
 public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
@@ -62,6 +91,7 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
     private readonly StateCallback _runningCallback;
     private readonly LevelCallback _levelCallback;
     private readonly CalibrationCallback _calibrationCallback;
+    private readonly AcousticCorrectionCallback _acousticCorrectionCallback;
     private nint _handle;
     private bool _disposed;
 
@@ -72,6 +102,7 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         _runningCallback = OnRunning;
         _levelCallback = OnLevel;
         _calibrationCallback = OnCalibration;
+        _acousticCorrectionCallback = OnAcousticCorrection;
 
         try
         {
@@ -81,6 +112,7 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
                 _runningCallback,
                 _levelCallback,
                 _calibrationCallback,
+                _acousticCorrectionCallback,
                 nint.Zero);
             IsAvailable = _handle != nint.Zero;
             if (!IsAvailable)
@@ -103,6 +135,8 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
     public event EventHandler<ProgramLevelEventArgs>? ProgramLevelChanged;
 
     public event EventHandler<CalibrationCompletedEventArgs>? CalibrationCompleted;
+
+    public event EventHandler<AcousticCorrectionEventArgs>? AcousticCorrectionChanged;
 
     public bool IsAvailable { get; }
 
@@ -259,8 +293,32 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         var response = string.IsNullOrWhiteSpace(json)
             ? null
             : JsonSerializer.Deserialize<CalibrationResponse>(json, SerializerOptions);
-        CalibrationCompleted?.Invoke(this, new CalibrationCompletedEventArgs(response?.Results ?? []));
+        var outcome = response?.Outcome?.ToLowerInvariant() switch
+        {
+            "cancelled" => CalibrationOutcome.Cancelled,
+            "failed" => CalibrationOutcome.Failed,
+            _ => CalibrationOutcome.Completed,
+        };
+        CalibrationCompleted?.Invoke(
+            this,
+            new CalibrationCompletedEventArgs(response?.Results ?? [], outcome));
     }
+
+    private void OnAcousticCorrection(
+        nint context,
+        nint deviceId,
+        int delayMilliseconds,
+        double driftPpm,
+        nint probeMode,
+        double confidence) =>
+        AcousticCorrectionChanged?.Invoke(
+            this,
+            new AcousticCorrectionEventArgs(
+                Marshal.PtrToStringUni(deviceId) ?? string.Empty,
+                delayMilliseconds,
+                driftPpm,
+                Marshal.PtrToStringUni(probeMode) ?? string.Empty,
+                confidence));
 
     public void Dispose()
     {
@@ -279,7 +337,9 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
 
     private sealed record DeviceResponse(IReadOnlyList<AudioEndpoint> Devices, string? Error);
 
-    private sealed record CalibrationResponse(IReadOnlyList<CalibrationResult> Results);
+    private sealed record CalibrationResponse(
+        IReadOnlyList<CalibrationResult> Results,
+        string? Outcome);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void TextCallback(nint context, nint message);
@@ -293,6 +353,15 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void CalibrationCallback(nint context, nint resultsJson);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void AcousticCorrectionCallback(
+        nint context,
+        nint deviceId,
+        int delayMilliseconds,
+        double driftPpm,
+        nint probeMode,
+        double confidence);
+
     private delegate int JsonBufferCallback(nint buffer, int capacity);
 
     [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
@@ -302,6 +371,7 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         StateCallback runningCallback,
         LevelCallback levelCallback,
         CalibrationCallback calibrationCallback,
+        AcousticCorrectionCallback acousticCorrectionCallback,
         nint context);
 
     [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]

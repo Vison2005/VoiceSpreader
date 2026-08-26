@@ -12,12 +12,19 @@ using VsTextCallback = void(__cdecl*)(void* context, const wchar_t* message);
 using VsStateCallback = void(__cdecl*)(void* context, int active);
 using VsLevelCallback = void(__cdecl*)(void* context, double levelDbfs, int probeAllowed);
 using VsCalibrationCallback = void(__cdecl*)(void* context, const wchar_t* resultsJson);
+using VsAcousticCorrectionCallback = void(__cdecl*)(void* context,
+                                                    const wchar_t* deviceId,
+                                                    int delayMilliseconds,
+                                                    double driftPpm,
+                                                    const wchar_t* probeMode,
+                                                    double confidence);
 
 VS_NATIVE_API void* __cdecl VS_Create(VsTextCallback statusCallback,
                                       VsTextCallback errorCallback,
                                       VsStateCallback runningCallback,
                                       VsLevelCallback levelCallback,
                                       VsCalibrationCallback calibrationCallback,
+                                      VsAcousticCorrectionCallback acousticCorrectionCallback,
                                       void* context);
 VS_NATIVE_API void __cdecl VS_Destroy(void* handle);
 

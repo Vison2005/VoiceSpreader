@@ -66,6 +66,7 @@ public:
     bool usesLowLatencyMode() const;
     int targetBufferMilliseconds() const;
     double targetBufferMillisecondsPrecise() const;
+    int manualDelayMilliseconds() const;
     int acousticDelayMilliseconds() const;
     double acousticDelayMillisecondsPrecise() const;
     std::uint32_t inputSampleRate() const;

@@ -11,8 +11,8 @@
 
             <ResourceDictionary.ThemeDictionaries>
                 <ResourceDictionary x:Key="Default">
-                    <SolidColorBrush x:Key="VoicePageBrush" Color="#FF111315" />
-                    <SolidColorBrush x:Key="VoiceSurfaceBrush" Color="#EC1C1F22" />
+                    <SolidColorBrush x:Key="VoicePageBrush" Color="#E8111315" />
+                    <SolidColorBrush x:Key="VoiceSurfaceBrush" Color="#E81C1F22" />
                     <SolidColorBrush x:Key="VoiceElevatedBrush" Color="#FF25292D" />
                     <SolidColorBrush x:Key="VoiceStrokeBrush" Color="#2AFFFFFF" />
                     <SolidColorBrush x:Key="VoiceMutedTextBrush" Color="#BFC7CDD4" />
@@ -20,8 +20,8 @@
                     <SolidColorBrush x:Key="VoiceTrackBrush" Color="#32FFFFFF" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
-                    <SolidColorBrush x:Key="VoicePageBrush" Color="#FFF4F6F7" />
-                    <SolidColorBrush x:Key="VoiceSurfaceBrush" Color="#F8FFFFFF" />
+                    <SolidColorBrush x:Key="VoicePageBrush" Color="#E8F4F6F7" />
+                    <SolidColorBrush x:Key="VoiceSurfaceBrush" Color="#F2FFFFFF" />
                     <SolidColorBrush x:Key="VoiceElevatedBrush" Color="#FFFFFFFF" />
                     <SolidColorBrush x:Key="VoiceStrokeBrush" Color="#1F18212A" />
                     <SolidColorBrush x:Key="VoiceMutedTextBrush" Color="#B83A424B" />
@@ -37,7 +37,7 @@
                 <Setter Property="Background" Value="{ThemeResource VoiceSurfaceBrush}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource VoiceStrokeBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
-                <Setter Property="CornerRadius" Value="8" />
+                <Setter Property="CornerRadius" Value="6" />
             </Style>
 
             <Style x:Key="VoiceIconButtonStyle" TargetType="Button">
@@ -52,7 +52,7 @@
 
             <Style x:Key="VoiceSectionTitleStyle" TargetType="TextBlock">
                 <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI" />
-                <Setter Property="FontSize" Value="18" />
+                <Setter Property="FontSize" Value="17" />
                 <Setter Property="FontWeight" Value="SemiBold" />
             </Style>
         </ResourceDictionary>

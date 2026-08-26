@@ -27,6 +27,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _isStarting;
     private bool _isRunning;
     private bool _isCalibrating;
+    private bool _isStoppingCalibration;
     private bool _isBluetoothBusy;
     private bool _isBluetoothConnected;
     private bool _startWithWindows;
@@ -68,6 +69,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _engine.RunningChanged += Engine_RunningChanged;
         _engine.ProgramLevelChanged += Engine_ProgramLevelChanged;
         _engine.CalibrationCompleted += Engine_CalibrationCompleted;
+        _engine.AcousticCorrectionChanged += Engine_AcousticCorrectionChanged;
         _bluetooth.StatusChanged += Bluetooth_StatusChanged;
         _bluetooth.ErrorOccurred += Bluetooth_ErrorOccurred;
         _bluetooth.BusyChanged += Bluetooth_BusyChanged;
@@ -220,6 +222,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             {
                 OnPropertyChanged(nameof(StartButtonText));
                 OnPropertyChanged(nameof(ControlsEnabled));
+                OnPropertyChanged(nameof(CanCalibrate));
+                UpdateOutputControlStates();
             }
         }
     }
@@ -233,15 +237,45 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             {
                 OnPropertyChanged(nameof(CalibrationButtonText));
                 OnPropertyChanged(nameof(ControlsEnabled));
+                OnPropertyChanged(nameof(AdjustmentsEnabled));
+                OnPropertyChanged(nameof(CanControlSynchronization));
+                OnPropertyChanged(nameof(CanCalibrate));
+                UpdateOutputControlStates();
+            }
+        }
+    }
+
+    public bool IsStoppingCalibration
+    {
+        get => _isStoppingCalibration;
+        private set
+        {
+            if (SetField(ref _isStoppingCalibration, value))
+            {
+                OnPropertyChanged(nameof(CalibrationButtonText));
+                OnPropertyChanged(nameof(CanCalibrate));
+                OnPropertyChanged(nameof(CanControlSynchronization));
             }
         }
     }
 
     public bool ControlsEnabled => !IsRunning && !_isStarting && !IsCalibrating;
 
+    public bool AdjustmentsEnabled => !IsCalibrating;
+
     public string StartButtonText => IsRunning || _isStarting ? "停止同步" : "开始同步";
 
-    public string CalibrationButtonText => IsCalibrating ? "停止校准" : "自动校准";
+    public string CalibrationButtonText => IsStoppingCalibration
+        ? "正在停止..."
+        : IsCalibrating ? "停止校准" : "自动校准";
+
+    public bool CanCalibrate => IsEngineAvailable
+                                && !IsStoppingCalibration
+                                && (IsCalibrating || (!IsRunning && !_isStarting));
+
+    public bool CanControlSynchronization => IsEngineAvailable
+                                             && !IsCalibrating
+                                             && !IsStoppingCalibration;
 
     public string StatusBadge
     {
@@ -501,6 +535,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return null;
         }
 
+        if (IsCalibrating || IsStoppingCalibration || _engine.IsCalibrating)
+        {
+            return "请先停止声学校准，再开始音频同步。";
+        }
+
         if (!IsEngineAvailable)
         {
             return NoticeMessage ?? "原生音频引擎不可用。";
@@ -525,6 +564,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return "启用自同步时，请选择用于连续测量的麦克风。";
         }
 
+        foreach (var output in selected)
+        {
+            output.AutomaticDelayMilliseconds = 0;
+        }
+
         var configuration = new EngineConfiguration(
             SelectedCapture,
             selected.Select(output => new OutputEngineSettings(
@@ -542,6 +586,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _isStarting = true;
         OnPropertyChanged(nameof(StartButtonText));
         OnPropertyChanged(nameof(ControlsEnabled));
+        OnPropertyChanged(nameof(CanCalibrate));
+        UpdateOutputControlStates();
         StatusBadge = "正在初始化";
         StatusTitle = "正在建立同步时钟";
         StatusMessage = $"正在连接 {selected.Length} 个输出端点，软件同步余量 {BufferMilliseconds} ms。";
@@ -552,6 +598,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _isStarting = false;
             OnPropertyChanged(nameof(StartButtonText));
             OnPropertyChanged(nameof(ControlsEnabled));
+            OnPropertyChanged(nameof(CanCalibrate));
+            UpdateOutputControlStates();
             return "音频引擎已经在启动或运行。";
         }
         return null;
@@ -559,11 +607,17 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public string? StartOrStopCalibration()
     {
+        if (IsStoppingCalibration)
+        {
+            return null;
+        }
         if (IsCalibrating || _engine.IsCalibrating)
         {
-            _engine.StopCalibration();
+            IsStoppingCalibration = true;
             StatusBadge = "正在停止";
             StatusTitle = "正在停止校准";
+            StatusMessage = "正在释放校准使用的音频设备，请稍候。";
+            _engine.StopCalibration();
             return null;
         }
         if (IsRunning || _isStarting)
@@ -621,6 +675,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                      !string.Equals(device.Id, SelectedCapture?.Id, StringComparison.OrdinalIgnoreCase)))
         {
             var item = new OutputEndpointItem(endpoint);
+            item.SelectionEnabled = ControlsEnabled;
+            item.AdjustmentsEnabled = AdjustmentsEnabled;
             if (_savedOutputs.TryGetValue(endpoint.Id, out var settings))
             {
                 item.IsSelected = settings.Selected;
@@ -649,6 +705,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             SelectedOutputs.Add(output);
         }
         OnPropertyChanged(nameof(SelectedOutputs));
+    }
+
+    private void UpdateOutputControlStates()
+    {
+        foreach (var output in Outputs)
+        {
+            output.SelectionEnabled = ControlsEnabled;
+            output.AdjustmentsEnabled = AdjustmentsEnabled;
+        }
     }
 
     private async Task SaveSettingsAsync()
@@ -704,6 +769,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         IsRunning = running;
         OnPropertyChanged(nameof(StartButtonText));
         OnPropertyChanged(nameof(ControlsEnabled));
+        UpdateOutputControlStates();
         StatusBadge = running ? "同步中" : "已停止";
         StatusTitle = running ? "所有输出共享同一时间线" : "同步已停止";
         if (!running)
@@ -727,9 +793,39 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         ProgramLevelText = $"节目电平 {level:0.0} dBFS · 探针{(args.ProbeAllowed ? "可用" : "暂停")}";
     });
 
+    private void Engine_AcousticCorrectionChanged(object? sender, AcousticCorrectionEventArgs args) =>
+        Dispatch(() =>
+        {
+            var output = Outputs.FirstOrDefault(item =>
+                string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+            if (output is null)
+            {
+                return;
+            }
+
+            output.AutomaticDelayMilliseconds = args.DelayMilliseconds;
+            output.CorrectionText =
+                $"{args.ProbeMode} · 自动 {args.DelayMilliseconds:+0;-0;0} ms · "
+                + $"漂移 {args.DriftPpm:+0.0;-0.0;0.0} ppm · 置信度 {args.Confidence:P0}";
+        });
+
     private void Engine_CalibrationCompleted(object? sender, CalibrationCompletedEventArgs args) => Dispatch(() =>
     {
         IsCalibrating = false;
+        IsStoppingCalibration = false;
+        if (args.Outcome == CalibrationOutcome.Cancelled)
+        {
+            StatusBadge = "已取消";
+            StatusTitle = "校准已停止";
+            StatusMessage = "音频设备已释放，可以重新校准或开始同步。";
+            AddActivity("声学校准已取消");
+            return;
+        }
+        if (args.Outcome == CalibrationOutcome.Failed)
+        {
+            return;
+        }
+
         var applied = 0;
         foreach (var result in args.Results)
         {
@@ -745,6 +841,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 : "未检测到有效到达峰";
             if (result.Detected)
             {
+                output.AutomaticDelayMilliseconds = 0;
                 output.DelayMilliseconds = result.RecommendedDelayMilliseconds;
                 applied++;
             }
@@ -879,6 +976,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _engine.RunningChanged -= Engine_RunningChanged;
         _engine.ProgramLevelChanged -= Engine_ProgramLevelChanged;
         _engine.CalibrationCompleted -= Engine_CalibrationCompleted;
+        _engine.AcousticCorrectionChanged -= Engine_AcousticCorrectionChanged;
         _bluetooth.StatusChanged -= Bluetooth_StatusChanged;
         _bluetooth.ErrorOccurred -= Bluetooth_ErrorOccurred;
         _bluetooth.BusyChanged -= Bluetooth_BusyChanged;

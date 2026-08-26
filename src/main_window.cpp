@@ -628,7 +628,11 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&calibrator_, &LatencyCalibrator::runningChanged,
             this, &MainWindow::updateCalibrationRunningState);
     connect(&calibrator_, &LatencyCalibrator::finished,
-            this, &MainWindow::applyCalibrationResults);
+            this, [this](bool cancelled, bool failed) {
+                if (!cancelled && !failed) {
+                    applyCalibrationResults();
+                }
+            });
 
     applyTheme();
     refreshDevices();
@@ -1108,7 +1112,7 @@ void MainWindow::startOrStopCalibration()
     if (calibrator_.isActive()) {
         calibrateButton_->setEnabled(false);
         stateLabel_->setText(QStringLiteral("正在停止校准"));
-        calibrator_.stop();
+        calibrator_.requestStop();
         return;
     }
 

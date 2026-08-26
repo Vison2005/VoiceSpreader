@@ -559,9 +559,12 @@ void AcousticDriftTracker::run()
                     state.mode = attemptedMode;
                     state.consecutiveFailures = 0;
                     state.lastConfidence = measurement.confidence;
+                    // 人工微调是用户指定的相对偏移，不应被声学控制器抵消。
                     const double underlyingLatency = measurement.latencyMilliseconds
                                                      - state.output.worker
-                                                           ->acousticDelayMillisecondsPrecise();
+                                                           ->acousticDelayMillisecondsPrecise()
+                                                     - state.output.worker
+                                                           ->manualDelayMilliseconds();
                     state.underlyingLatencyHistory.push_back(underlyingLatency);
                     state.confidenceHistory.push_back(measurement.confidence);
                     while (state.underlyingLatencyHistory.size() > 3) {

@@ -1,6 +1,7 @@
 #include "audio_engine.h"
 
 #include "acoustic_drift_tracker.h"
+#include "delay_normalization.h"
 #include "output_worker.h"
 #include "remote_microphone_buffer.h"
 #include "wasapi_helpers.h"
@@ -137,7 +138,7 @@ bool AudioEngine::start(const AudioDevice& captureSource,
         for (const OutputDeviceSettings& output : outputDevices) {
             requestedOutputDelays_.insert(
                 output.device.id,
-                std::clamp(output.extraDelayMilliseconds, 0, 2000));
+                std::clamp(output.extraDelayMilliseconds, -500, 500));
         }
     }
 
@@ -167,12 +168,30 @@ void AudioEngine::setOutputVolume(const QString& deviceId, int volumePercent)
 
 void AudioEngine::setOutputDelay(const QString& deviceId, int delayMilliseconds)
 {
-    const int limitedDelay = std::clamp(delayMilliseconds, 0, 2000);
+    const int limitedDelay = std::clamp(delayMilliseconds, -500, 500);
     std::lock_guard<std::mutex> lock(activeWorkersMutex_);
     requestedOutputDelays_.insert(deviceId, limitedDelay);
-    const auto iterator = activeWorkers_.constFind(deviceId);
-    if (iterator != activeWorkers_.constEnd() && iterator.value() != nullptr) {
-        iterator.value()->setManualDelayMilliseconds(limitedDelay);
+    applyRequestedOutputDelaysLocked();
+}
+
+void AudioEngine::applyRequestedOutputDelaysLocked()
+{
+    QSet<QString> activeDeviceIds;
+    for (auto iterator = activeWorkers_.constBegin(); iterator != activeWorkers_.constEnd();
+         ++iterator) {
+        if (iterator.value() != nullptr) {
+            activeDeviceIds.insert(iterator.key());
+        }
+    }
+
+    const QHash<QString, int> normalized = normalizeRelativeOutputDelays(
+        requestedOutputDelays_,
+        activeDeviceIds);
+    for (auto iterator = activeWorkers_.constBegin(); iterator != activeWorkers_.constEnd();
+         ++iterator) {
+        if (iterator.value() != nullptr) {
+            iterator.value()->setManualDelayMilliseconds(normalized.value(iterator.key()));
+        }
     }
 }
 
@@ -271,9 +290,9 @@ void AudioEngine::run(AudioDevice captureSource,
                 true);
             {
                 std::lock_guard<std::mutex> lock(activeWorkersMutex_);
-                worker->setManualDelayMilliseconds(
-                    requestedOutputDelays_.value(output.device.id,
-                                                 output.extraDelayMilliseconds));
+                const QHash<QString, int> normalized = normalizeRelativeOutputDelays(
+                    requestedOutputDelays_);
+                worker->setManualDelayMilliseconds(normalized.value(output.device.id));
             }
             worker->start();
             outputWorkers.push_back(std::move(worker));
@@ -290,10 +309,6 @@ void AudioEngine::run(AudioDevice captureSource,
                     activeWorkers_.insert(deviceId, worker.get());
                     worker->setSynchronizationMarginMilliseconds(
                         requestedSynchronizationMarginMilliseconds_.load());
-                    worker->setManualDelayMilliseconds(
-                        requestedOutputDelays_.value(
-                            deviceId,
-                            outputDevices.at(index).extraDelayMilliseconds));
                 }
             } else {
                 const QString failure = worker->failureMessage().isEmpty()
@@ -305,6 +320,11 @@ void AudioEngine::run(AudioDevice captureSource,
 
         if (activeOutputCount == 0) {
             throw std::runtime_error("没有输出设备成功启动");
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(activeWorkersMutex_);
+            applyRequestedOutputDelaysLocked();
         }
 
         // 声学自同步会直接测量扬声器到麦克风的总路径；同时叠加静态
@@ -341,6 +361,11 @@ void AudioEngine::run(AudioDevice captureSource,
                     std::max(0.0,
                              maximumEffectiveLatencyMilliseconds - effectiveLatency)));
                 worker->setAutomaticDelayMilliseconds(compensationMilliseconds);
+                emit acousticCorrectionChanged(worker->device().id,
+                                               compensationMilliseconds,
+                                               0.0,
+                                               QStringLiteral("静态补偿"),
+                                               1.0);
                 if (compensationMilliseconds > 0) {
                     emit statusChanged(QStringLiteral("自动补偿：%1 增加 %2 ms，使输出设备彼此对齐")
                                            .arg(outputDevices.at(index).device.name)

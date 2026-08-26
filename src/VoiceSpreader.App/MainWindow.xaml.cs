@@ -14,9 +14,9 @@ namespace VoiceSpreader.App;
 public sealed partial class MainWindow : Window
 {
     private const int InitialLogicalWidth = 1160;
-    private const int InitialLogicalHeight = 800;
+    private const int InitialLogicalHeight = 840;
     private const int MinimumLogicalWidth = 760;
-    private const int MinimumLogicalHeight = 680;
+    private const int MinimumLogicalHeight = 820;
     private bool _initialSizeApplied;
     private readonly TrayIconService _trayIcon;
     private bool _exitRequested;

@@ -100,12 +100,14 @@ struct BridgeHandle
                  VsStateCallback running,
                  VsLevelCallback level,
                  VsCalibrationCallback calibration,
+                 VsAcousticCorrectionCallback acousticCorrection,
                  void* callbackContext)
         : statusCallback(status)
         , errorCallback(error)
         , runningCallback(running)
         , levelCallback(level)
         , calibrationCallback(calibration)
+        , acousticCorrectionCallback(acousticCorrection)
         , context(callbackContext)
     {
         QObject::connect(&engine,
@@ -142,6 +144,24 @@ struct BridgeHandle
                              }
                          },
                          Qt::DirectConnection);
+        QObject::connect(&engine,
+                         &AudioEngine::acousticCorrectionChanged,
+                         &engine,
+                         [this](const QString& deviceId,
+                                int delayMilliseconds,
+                                double driftPpm,
+                                const QString& probeMode,
+                                double confidence) {
+                             if (acousticCorrectionCallback != nullptr) {
+                                 acousticCorrectionCallback(context,
+                                                            deviceId.toStdWString().c_str(),
+                                                            delayMilliseconds,
+                                                            driftPpm,
+                                                            probeMode.toStdWString().c_str(),
+                                                            confidence);
+                             }
+                         },
+                         Qt::DirectConnection);
 
         QObject::connect(&calibrator,
                          &LatencyCalibrator::statusChanged,
@@ -160,7 +180,7 @@ struct BridgeHandle
         QObject::connect(&calibrator,
                          &LatencyCalibrator::finished,
                          &calibrator,
-                         [this] {
+                         [this](bool cancelled, bool failed) {
                              if (calibrationCallback == nullptr) {
                                  return;
                              }
@@ -178,6 +198,11 @@ struct BridgeHandle
                              }
                              QJsonObject payload;
                              payload.insert(QStringLiteral("results"), array);
+                             payload.insert(QStringLiteral("outcome"),
+                                            cancelled
+                                                ? QStringLiteral("cancelled")
+                                                : failed ? QStringLiteral("failed")
+                                                         : QStringLiteral("completed"));
                              const std::wstring json = QString::fromUtf8(
                                  QJsonDocument(payload).toJson(QJsonDocument::Compact))
                                                            .toStdWString();
@@ -195,6 +220,7 @@ struct BridgeHandle
     VsStateCallback runningCallback = nullptr;
     VsLevelCallback levelCallback = nullptr;
     VsCalibrationCallback calibrationCallback = nullptr;
+    VsAcousticCorrectionCallback acousticCorrectionCallback = nullptr;
     void* context = nullptr;
 };
 
@@ -209,6 +235,7 @@ void* __cdecl VS_Create(VsTextCallback statusCallback,
                         VsStateCallback runningCallback,
                         VsLevelCallback levelCallback,
                         VsCalibrationCallback calibrationCallback,
+                        VsAcousticCorrectionCallback acousticCorrectionCallback,
                         void* context)
 {
     try {
@@ -217,6 +244,7 @@ void* __cdecl VS_Create(VsTextCallback statusCallback,
                                 runningCallback,
                                 levelCallback,
                                 calibrationCallback,
+                                acousticCorrectionCallback,
                                 context);
     } catch (...) {
         return nullptr;
@@ -242,6 +270,12 @@ int __cdecl VS_Start(void* handle, const wchar_t* configurationJson)
 {
     BridgeHandle* value = bridge(handle);
     if (value == nullptr) {
+        return 0;
+    }
+    if (value->calibrator.isActive()) {
+        invokeText(value->errorCallback,
+                   value->context,
+                   QStringLiteral("声学校准进行中，无法启动音频同步"));
         return 0;
     }
 
@@ -327,6 +361,12 @@ int __cdecl VS_StartCalibration(void* handle, const wchar_t* configurationJson)
     if (value == nullptr) {
         return 0;
     }
+    if (value->engine.isActive()) {
+        invokeText(value->errorCallback,
+                   value->context,
+                   QStringLiteral("音频同步运行中，无法启动声学校准"));
+        return 0;
+    }
 
     QString error;
     const QJsonObject configuration = parseObject(configurationJson, &error);
@@ -347,7 +387,7 @@ int __cdecl VS_StartCalibration(void* handle, const wchar_t* configurationJson)
 void __cdecl VS_StopCalibration(void* handle)
 {
     if (BridgeHandle* value = bridge(handle)) {
-        value->calibrator.stop();
+        value->calibrator.requestStop();
     }
 }
 

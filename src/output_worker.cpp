@@ -438,6 +438,11 @@ double OutputWorker::targetBufferMillisecondsPrecise() const
     return targetBufferMillisecondsPrecise_.load();
 }
 
+int OutputWorker::manualDelayMilliseconds() const
+{
+    return manualDelayMilliseconds_.load();
+}
+
 int OutputWorker::acousticDelayMilliseconds() const
 {
     return acousticDelayMilliseconds_.load();

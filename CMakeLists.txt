@@ -47,6 +47,7 @@ set(VOICESPREADER_SOURCES
     src/output_worker.h
     src/audio_engine.cpp
     src/audio_engine.h
+    src/delay_normalization.h
     src/main_window.cpp
     src/main_window.h
     src/level_meter_widget.cpp
@@ -106,6 +107,7 @@ set(VOICESPREADER_NATIVE_SOURCES
     src/output_worker.h
     src/audio_engine.cpp
     src/audio_engine.h
+    src/delay_normalization.h
     src/latency_calibrator.cpp
     src/latency_calibrator.h
     src/native_bridge.cpp
@@ -135,6 +137,14 @@ target_link_libraries(VoiceSpreaderNative PRIVATE
 install(TARGETS VoiceSpreaderNative RUNTIME DESTINATION .)
 
 if(BUILD_TESTING)
+    add_executable(DelayNormalizationTest tests/delay_normalization_test.cpp)
+    target_include_directories(DelayNormalizationTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(MSVC)
+        target_compile_options(DelayNormalizationTest PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    target_link_libraries(DelayNormalizationTest PRIVATE Qt5::Core)
+    add_test(NAME DelayNormalizationTest COMMAND DelayNormalizationTest)
+
     add_executable(FrameRingBufferTest
         tests/frame_ring_buffer_test.cpp
         src/frame_ring_buffer.cpp

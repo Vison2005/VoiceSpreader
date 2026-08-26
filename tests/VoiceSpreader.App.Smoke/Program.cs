@@ -4,6 +4,14 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using VoiceSpreader.App.Services;
+using VoiceSpreader.App.Models;
+
+var adjustableOutput = new OutputEndpointItem(new AudioEndpoint("test-output", "测试输出", false))
+{
+    DelayMilliseconds = -25,
+};
+Require(adjustableOutput.DelayMilliseconds == -25, "输出相对补偿不接受负值");
+Require(adjustableOutput.DelayDisplay == "-25 ms", "输出相对补偿显示格式无效");
 
 var sink = new RecordingRemoteMicrophoneSink();
 using var service = new PhonePairingService(sink);
