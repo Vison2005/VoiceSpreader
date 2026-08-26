@@ -1,14 +1,15 @@
 ﻿[CmdletBinding()]
 param(
     [string]$QtRoot = 'D:\Anaconda\Library',
-    [string]$PackageDir = 'dist\VoiceSpreader'
+    [string]$PackageDir = 'dist\VoiceSpreader',
+    [switch]$SkipPackage
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectDir = (Resolve-Path -LiteralPath (Split-Path -Parent $MyInvocation.MyCommand.Path)).Path
-$buildDir = Join-Path $projectDir 'build-msvc-v100'
+$buildDir = Join-Path $projectDir 'build-msvc-v110'
 $packageDir = if ([System.IO.Path]::IsPathRooted($PackageDir)) {
     $PackageDir
 } else {
@@ -75,6 +76,13 @@ if ($LASTEXITCODE -ne 0) {
 $builtExe = Join-Path $buildDir 'VoiceSpreader.exe'
 if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) {
     throw "The build did not produce the expected executable: $builtExe"
+}
+
+if ($SkipPackage) {
+    Write-Host ''
+    Write-Host 'Native build succeeded.' -ForegroundColor Green
+    Write-Host "Bridge: $(Join-Path $buildDir 'VoiceSpreader.Native.dll')"
+    return
 }
 
 New-Item -ItemType Directory -Path $packageDir -Force | Out-Null

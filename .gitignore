@@ -3,5 +3,7 @@
 /dist/
 /VoiceSpreader.zip
 /.vs/
+**/bin/
+**/obj/
 *.user
 *.log

@@ -1,0 +1,20 @@
+namespace VoiceSpreader.App.Models;
+
+public sealed record OutputSettings(bool Selected = false, int VolumePercent = 100, int DelayMilliseconds = 0);
+
+public sealed record AppSettings
+{
+    public string? CaptureDeviceId { get; init; }
+
+    public string? MicrophoneDeviceId { get; init; }
+
+    public int BufferMilliseconds { get; init; } = 5;
+
+    public bool AutomaticLatencyCompensation { get; init; } = true;
+
+    public bool ContinuousAcousticTracking { get; init; } = true;
+
+    public bool ExclusiveMode { get; init; }
+
+    public Dictionary<string, OutputSettings> Outputs { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+}

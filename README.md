@@ -4,6 +4,15 @@ VoiceSpreader 是 VoiceSharer 的 C++/Qt 重构项目。当前阶段先实现不
 
 桌面程序使用 HarmonyOS Sans SC 字体，字体版权归 Huawei Device Co., Ltd. 所有，并依照 HarmonyOS Sans Fonts License Agreement 随程序嵌入。完整许可文本位于发行目录的 `licenses/HarmonyOS_Sans_LICENSE.txt`。
 
+## 版本状态
+
+- `v1.0.0`：Qt Widgets 稳定版本，代码位于 `main` 分支并已建立同名 Git 标签。
+- `v1.1.0`（开发中）：使用 C#、WinUI 3 和 Windows App SDK 重做桌面界面，代码位于 `feature/winui-v1.1.0` 分支。该版本使用 Mica、Windows 原生控件、系统主题与系统强调色，并针对宽屏和紧凑窗口提供自适应布局。
+
+WinUI 版本通过 `VoiceSpreader.Native.dll` 复用现有 C++ 音频引擎。目前已接通真实 WASAPI 设备枚举、配置持久化、多输出启停、运行时音量/延迟/同步余量调节、节目电平和声学校准。Qt Widgets 不再参与新界面，但原生桥接层暂时仍依赖 QtCore 中的基础类型；后续会逐步移除这项运行时依赖。
+
+`v1.1.0` 尚未迁移手机配对与远程麦克风、蓝牙 A2DP 接收、系统托盘/开机自启、安装包和完整本地化，因此当前不作为正式版本发布。
+
 ## 当前可用功能
 
 - 枚举 Windows 中所有活动的渲染设备。
@@ -80,6 +89,24 @@ VoiceSpreader 是 VoiceSharer 的 C++/Qt 重构项目。当前阶段先实现不
 如果电脑同时启用有线、Wi-Fi、VPN 或虚拟机网卡，配对窗口会列出全部可用 IPv4 地址并默认优先实体有线网卡。二维码直连失败时，Android 端还会用二维码中的随机会话 ID 广播定位电脑，并采用 UDP 回包的实际源地址重连。桥接网络中仍可在“二维码电脑地址”手动选择与手机同一局域网的地址；例如本机有线地址为 `192.168.3.133` 时，应选择它而不是默认网关 `192.168.3.1`。
 
 ## 本机构建
+
+### WinUI 3（v1.1.0 开发版）
+
+除下方 C++ 工具链外，还需要 .NET 9 SDK。执行以下命令会先构建原生桥接库，再构建并启动 WinUI 应用：
+
+```powershell
+.\build-winui.ps1 -Configuration Debug -Run
+```
+
+仅构建 Release 版本：
+
+```powershell
+.\build-winui.ps1 -Configuration Release
+```
+
+Release 产物位于 `src\VoiceSpreader.App\bin\Release\net9.0-windows10.0.26100.0\win-x64\`。应用以非打包、自包含的 WinUI 3 桌面程序运行，目录中会同时部署原生桥接库及其当前所需的 QtCore 运行库。
+
+### Qt Widgets（v1.0.0）
 
 当前构建脚本默认使用：
 
