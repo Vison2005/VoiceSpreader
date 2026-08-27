@@ -9,6 +9,11 @@ public enum AppThemeMode
 
 public sealed record OutputSettings(bool Selected = false, int VolumePercent = 100, int DelayMilliseconds = 0);
 
+public sealed record PhoneDeviceSettings(
+    bool UseAsMicrophone = false,
+    bool UseAsSpeaker = false,
+    int MicrophoneGainPercent = 100);
+
 public sealed record AppSettings
 {
     public string? CaptureDeviceId { get; init; }
@@ -34,6 +39,9 @@ public sealed record AppSettings
     public string? PhonePlaybackSourceDeviceId { get; init; }
 
     public int PhonePlaybackVolume { get; init; } = 100;
+
+    public Dictionary<string, PhoneDeviceSettings> PhoneDevices { get; init; } =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public Dictionary<string, OutputSettings> Outputs { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }

@@ -67,6 +67,11 @@ VS_NATIVE_API void __cdecl VS_AppendRemoteMicrophonePcm16(
     std::uint32_t sampleRate,
     const std::int16_t* samples,
     int sampleCount);
+VS_NATIVE_API void __cdecl VS_PushRemoteMicrophoneOutputPcm16(
+    void* handle,
+    std::uint32_t sampleRate,
+    const std::int16_t* samples,
+    int sampleCount);
 VS_NATIVE_API int __cdecl VS_StartRemoteMicrophoneOutput(
     void* handle,
     const wchar_t* deviceId,

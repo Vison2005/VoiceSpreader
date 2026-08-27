@@ -14,7 +14,7 @@ namespace VoiceSpreader.App;
 public sealed partial class MainPage : Page
 {
     private const double OutputRowHeight = 68;
-    private const double DefaultOutputListMaximumHeight = 390;
+    private const double DefaultOutputListMaximumHeight = OutputRowHeight * 5;
     private const double ModerateColumnOverflow = 96;
     private bool _loaded;
     private bool _wideLayout;
@@ -56,10 +56,26 @@ public sealed partial class MainPage : Page
         Grid.SetRow(StatusColumn, wide ? 0 : 1);
         Grid.SetColumn(DeviceLinkStatusColumn, wide ? 1 : 0);
         Grid.SetRow(DeviceLinkStatusColumn, wide ? 0 : 1);
+        Grid.SetColumnSpan(DeviceLinkRouteCard, wide ? 2 : 1);
+        Grid.SetRow(DeviceLinkRouteCard, wide ? 1 : 2);
+        var routesWide = args.NewSize.Width >= 780;
+        PhoneMicrophoneRouteColumn.Width = new GridLength(1, GridUnitType.Star);
+        PhoneRouteSeparatorColumn.Width = routesWide ? new GridLength(1) : new GridLength(0);
+        PhoneSpeakerRouteColumn.Width = routesWide ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+        Grid.SetColumn(PhoneMicrophoneRoutePanel, 0);
+        Grid.SetRow(PhoneMicrophoneRoutePanel, 0);
+        Grid.SetColumnSpan(PhoneMicrophoneRoutePanel, routesWide ? 1 : 3);
+        Grid.SetColumn(PhoneRouteSeparator, routesWide ? 1 : 0);
+        Grid.SetRow(PhoneRouteSeparator, routesWide ? 0 : 1);
+        Grid.SetColumnSpan(PhoneRouteSeparator, routesWide ? 1 : 3);
+        PhoneRouteSeparator.Height = routesWide ? double.NaN : 1;
+        Grid.SetColumn(PhoneSpeakerRoutePanel, routesWide ? 2 : 0);
+        Grid.SetRow(PhoneSpeakerRoutePanel, routesWide ? 0 : 2);
+        Grid.SetColumnSpan(PhoneSpeakerRoutePanel, routesWide ? 1 : 3);
         WorkspaceGrid.ColumnSpacing = wide ? 16 : 0;
         WorkspaceGrid.RowSpacing = wide ? 0 : 16;
         DeviceLinkWorkspace.ColumnSpacing = wide ? 16 : 0;
-        DeviceLinkWorkspace.RowSpacing = wide ? 0 : 16;
+        DeviceLinkWorkspace.RowSpacing = 16;
         QueueAdaptiveWorkspaceLayout();
     }
 
@@ -97,26 +113,28 @@ public sealed partial class MainPage : Page
             SetOutputListMaximumHeight(DefaultOutputListMaximumHeight);
             return;
         }
-        if (OutputDevicesCard.ActualHeight <= 0
-            || SyncControlCard.ActualHeight <= 0
-            || OutputDeviceList.ActualHeight <= 0)
+        if (AudioSourceCard.DesiredSize.Height <= 0
+            || OutputDevicesCard.DesiredSize.Height <= 0
+            || SyncStatusCard.DesiredSize.Height <= 0
+            || SyncControlCard.DesiredSize.Height <= 0
+            || OutputDeviceList.DesiredSize.Height <= 0)
         {
             return;
         }
 
-        var outputCardBottom = OutputDevicesCard
-            .TransformToVisual(PrimaryContentColumn)
-            .TransformPoint(new Windows.Foundation.Point(0, OutputDevicesCard.ActualHeight))
-            .Y;
-        var syncControlBottom = SyncControlCard
-            .TransformToVisual(StatusColumn)
-            .TransformPoint(new Windows.Foundation.Point(0, SyncControlCard.ActualHeight))
-            .Y;
-        var fixedPrimaryHeight = Math.Max(0, outputCardBottom - OutputDeviceList.ActualHeight);
+        var outputCardChromeHeight = Math.Max(
+            0,
+            OutputDevicesCard.DesiredSize.Height - OutputDeviceList.DesiredSize.Height);
+        var fixedPrimaryHeight = AudioSourceCard.DesiredSize.Height
+                                 + 16
+                                 + outputCardChromeHeight;
+        var naturalStatusHeight = SyncStatusCard.DesiredSize.Height
+                                  + 16
+                                  + SyncControlCard.DesiredSize.Height;
         var naturalListHeight = ViewModel.Outputs.Count * OutputRowHeight;
         var naturalPrimaryHeight = fixedPrimaryHeight + naturalListHeight;
 
-        if (naturalPrimaryHeight - syncControlBottom <= ModerateColumnOverflow)
+        if (naturalPrimaryHeight - naturalStatusHeight <= ModerateColumnOverflow)
         {
             SetOutputListMaximumHeight(naturalListHeight);
             return;
@@ -124,7 +142,7 @@ public sealed partial class MainPage : Page
 
         var availableListHeight = Math.Max(
             OutputRowHeight * 3,
-            syncControlBottom - fixedPrimaryHeight);
+            naturalStatusHeight - fixedPrimaryHeight);
         var completeVisibleRows = Math.Max(3, Math.Floor(availableListHeight / OutputRowHeight));
         SetOutputListMaximumHeight(Math.Min(
             naturalListHeight,
@@ -189,14 +207,8 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async void PhoneMicrophoneButton_Click(object sender, RoutedEventArgs args)
-    {
-        var error = await ViewModel.TogglePhoneMicrophoneAsync();
-        if (error is not null)
-        {
-            await ShowValidationAsync("手机麦克风控制失败", error);
-        }
-    }
+    private void OpenDeviceLinkButton_Click(object sender, RoutedEventArgs args) =>
+        WorkspaceSelector.SelectedItem = WorkspaceSelector.Items[1];
 
     private async void PhoneFlyout_Opening(object sender, object args) =>
         await UpdatePhoneQrCodeAsync();
@@ -220,6 +232,14 @@ public sealed partial class MainPage : Page
             var source = await QrCodeService.CreateImageAsync(ViewModel.PhonePairingPayload);
             PhoneQrImage.Source = source;
             DeviceLinkQrImage.Source = source;
+        }
+    }
+
+    private void DisconnectPhoneDeviceButton_Click(object sender, RoutedEventArgs args)
+    {
+        if (sender is Button { DataContext: PhoneDeviceItem device })
+        {
+            ViewModel.DisconnectPhoneDevice(device.Id);
         }
     }
 

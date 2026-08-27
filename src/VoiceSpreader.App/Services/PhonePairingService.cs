@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -10,17 +11,46 @@ using System.Threading.Channels;
 
 namespace VoiceSpreader.App.Services;
 
-public sealed class PhoneConnectionChangedEventArgs(bool connected, string phoneName) : EventArgs
+public sealed record PhoneDeviceSnapshot(
+    string Id,
+    string Name,
+    string RemoteAddress,
+    int Protocol,
+    bool MicrophoneStreaming,
+    bool PlaybackRequested,
+    bool PlaybackStreaming,
+    int MicrophoneGainPercent,
+    double MicrophoneLevelDbfs,
+    double ClockDriftPpm,
+    int MicrophoneBufferedMilliseconds,
+    DateTimeOffset ConnectedAt)
+{
+    public bool SupportsPlayback => Protocol >= 2;
+}
+
+public sealed class PhoneDevicesChangedEventArgs(IReadOnlyList<PhoneDeviceSnapshot> devices) : EventArgs
+{
+    public IReadOnlyList<PhoneDeviceSnapshot> Devices { get; } = devices;
+}
+
+public sealed class PhoneConnectionChangedEventArgs(
+    bool connected,
+    string phoneName,
+    string deviceId = "") : EventArgs
 {
     public bool Connected { get; } = connected;
 
     public string PhoneName { get; } = phoneName;
+
+    public string DeviceId { get; } = deviceId;
 }
 
 public sealed class PhonePairingService : IDisposable
 {
     private const int DiscoveryPort = 39741;
     private const int MaximumFrameBytes = 256 * 1024;
+    private const int MaximumMicrophoneFrameBytes = (int)RemoteSampleRate * sizeof(short) / 5;
+    private const int MixerChunkFrames = 480;
     private const uint RemoteSampleRate = 48_000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly string[] VirtualAdapterMarkers =
@@ -28,30 +58,16 @@ public sealed class PhonePairingService : IDisposable
 
     private readonly IRemoteMicrophoneSink _audioEngine;
     private readonly ISystemAudioCaptureSource? _systemAudioSource;
-    private readonly object _clientLock = new();
-    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private readonly object _sessionsLock = new();
+    private readonly Dictionary<string, DeviceSession> _sessions =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _lifetime = new();
-    private readonly Channel<SystemAudioFrameEventArgs> _playbackFrames =
-        Channel.CreateBounded<SystemAudioFrameEventArgs>(new BoundedChannelOptions(12)
-        {
-            FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = true,
-            SingleWriter = true,
-        });
-    private readonly Task _playbackSendTask;
+    private readonly Task _microphoneMixerTask;
     private TcpListener? _listener;
     private UdpClient? _discovery;
-    private TcpClient? _client;
-    private volatile NetworkStream? _clientStream;
     private string _sessionId = string.Empty;
     private string _sessionSecret = string.Empty;
     private string _pairingCode = string.Empty;
-    private string _phoneName = string.Empty;
-    private volatile bool _authenticated;
-    private bool _microphoneStreaming;
-    private volatile bool _playbackRequested;
-    private volatile bool _playbackStreaming;
-    private volatile int _negotiatedProtocol = 1;
     private bool _disposed;
 
     public PhonePairingService(
@@ -64,7 +80,7 @@ public sealed class PhonePairingService : IDisposable
         {
             _systemAudioSource.SystemAudioFrameReady += SystemAudioSource_FrameReady;
         }
-        _playbackSendTask = PlaybackSendLoopAsync(_lifetime.Token);
+        _microphoneMixerTask = MicrophoneMixerLoopAsync(_lifetime.Token);
         LocalAddresses = GetLocalIpv4Addresses();
         LocalAddress = LocalAddresses.Count > 0 ? LocalAddresses[0] : IPAddress.Loopback.ToString();
         GenerateCredentials();
@@ -73,6 +89,8 @@ public sealed class PhonePairingService : IDisposable
     public event EventHandler<string>? StatusChanged;
 
     public event EventHandler<PhoneConnectionChangedEventArgs>? ConnectionChanged;
+
+    public event EventHandler<PhoneDevicesChangedEventArgs>? DevicesChanged;
 
     public event EventHandler<bool>? MicrophoneStreamingChanged;
 
@@ -90,15 +108,76 @@ public sealed class PhonePairingService : IDisposable
 
     public string PairingPayload => $"VSP1:{LocalAddress}:{ServerPort}:{_sessionId}:{_sessionSecret}";
 
-    public bool IsPhoneConnected => _authenticated && _client?.Connected == true;
+    public IReadOnlyList<PhoneDeviceSnapshot> ConnectedDevices
+    {
+        get
+        {
+            lock (_sessionsLock)
+            {
+                return CreateSnapshotsLocked();
+            }
+        }
+    }
 
-    public bool IsMicrophoneStreaming => _microphoneStreaming;
+    public bool IsPhoneConnected
+    {
+        get
+        {
+            lock (_sessionsLock)
+            {
+                return _sessions.Count > 0;
+            }
+        }
+    }
 
-    public bool IsPlaybackStreaming => _playbackStreaming;
+    public bool IsMicrophoneStreaming
+    {
+        get
+        {
+            lock (_sessionsLock)
+            {
+                return _sessions.Values.Any(session => session.MicrophoneStreaming);
+            }
+        }
+    }
 
-    public bool SupportsPlayback => _authenticated && _negotiatedProtocol >= 2;
+    public bool IsPlaybackStreaming
+    {
+        get
+        {
+            lock (_sessionsLock)
+            {
+                return _sessions.Values.Any(session => session.PlaybackStreaming);
+            }
+        }
+    }
 
-    public string ConnectedPhoneName => _phoneName;
+    public bool SupportsPlayback
+    {
+        get
+        {
+            lock (_sessionsLock)
+            {
+                return _sessions.Values.Any(session => session.Protocol >= 2);
+            }
+        }
+    }
+
+    public string ConnectedPhoneName
+    {
+        get
+        {
+            lock (_sessionsLock)
+            {
+                return _sessions.Count switch
+                {
+                    0 => string.Empty,
+                    1 => _sessions.Values.First().Name,
+                    _ => $"{_sessions.Count} 台设备",
+                };
+            }
+        }
+    }
 
     public void Start()
     {
@@ -134,7 +213,7 @@ public sealed class PhonePairingService : IDisposable
             StatusChanged?.Invoke(this, $"手机配对码发现不可用：{exception.Message}；二维码仍可使用。");
         }
 
-        StatusChanged?.Invoke(this, $"手机设备互联服务已启动：{LocalAddress}:{ServerPort}");
+        StatusChanged?.Invoke(this, $"移动设备互联服务已启动：{LocalAddress}:{ServerPort}");
     }
 
     public bool SetLocalAddress(string address)
@@ -145,99 +224,176 @@ public sealed class PhonePairingService : IDisposable
         }
 
         LocalAddress = address;
-        StatusChanged?.Invoke(this, $"手机配对地址已切换到 {address}");
+        StatusChanged?.Invoke(this, $"移动设备配对地址已切换到 {address}");
         return true;
     }
 
     public async Task<bool> SetMicrophoneEnabledAsync(bool enabled)
     {
-        var stream = _clientStream;
-        if (!_authenticated || stream is null)
+        var session = GetFirstSession();
+        if (session is null)
         {
-            StatusChanged?.Invoke(this, "手机尚未连接，无法切换麦克风。");
+            StatusChanged?.Invoke(this, "尚未连接移动设备，无法切换麦克风。");
+            return false;
+        }
+        return await SetMicrophoneEnabledAsync(session.Id, enabled);
+    }
+
+    public async Task<bool> SetMicrophoneEnabledAsync(string deviceId, bool enabled)
+    {
+        var session = GetSession(deviceId);
+        if (session is null)
+        {
+            StatusChanged?.Invoke(this, "目标设备已经断开，无法切换麦克风。");
             return false;
         }
 
+        var revision = Interlocked.Increment(ref session.MicrophoneCommandRevision);
         try
         {
-            if (_negotiatedProtocol >= 2)
+            await session.MicrophoneCommandGate.WaitAsync(session.Cancellation.Token);
+            try
             {
-                await SendBinaryFrameAsync(new byte[] { 10, enabled ? (byte)1 : (byte)0 },
-                                           stream,
-                                           _lifetime.Token);
+                if (revision != Volatile.Read(ref session.MicrophoneCommandRevision))
+                {
+                    return true;
+                }
+                if (session.Protocol >= 2)
+                {
+                    await SendBinaryFrameAsync(
+                        new byte[] { 10, enabled ? (byte)1 : (byte)0 },
+                        session,
+                        session.Cancellation.Token);
+                }
+                else
+                {
+                    await SendJsonLineAsync(
+                        new { type = "setMicrophone", enabled },
+                        session,
+                        session.Cancellation.Token);
+                }
             }
-            else
+            finally
             {
-                await SendJsonLineAsync(
-                    new { type = "setMicrophone", enabled },
-                    stream,
-                    _lifetime.Token);
+                session.MicrophoneCommandGate.Release();
             }
             StatusChanged?.Invoke(
                 this,
-                enabled ? "已请求手机启用麦克风。" : "已请求手机停止并释放麦克风。");
+                enabled
+                    ? $"已请求 {session.Name} 启用麦克风。"
+                    : $"已请求 {session.Name} 停止并释放麦克风。");
             return true;
         }
-        catch (Exception exception) when (exception is IOException or SocketException)
+        catch (Exception exception) when (exception is IOException
+                                          or SocketException
+                                          or ObjectDisposedException
+                                          or OperationCanceledException)
         {
-            StatusChanged?.Invoke(this, $"向手机发送麦克风控制命令失败：{exception.Message}");
+            StatusChanged?.Invoke(this, $"向 {session.Name} 发送麦克风命令失败：{exception.Message}");
             return false;
         }
     }
 
     public async Task<bool> SetPlaybackEnabledAsync(bool enabled)
     {
-        var stream = _clientStream;
-        if (!_authenticated || stream is null || _negotiatedProtocol < 2)
+        var session = GetFirstSession(requirePlayback: true);
+        if (session is null)
+        {
+            StatusChanged?.Invoke(this, "尚未连接支持播放的移动设备。");
+            return false;
+        }
+        return await SetPlaybackEnabledAsync(session.Id, enabled);
+    }
+
+    public async Task<bool> SetPlaybackEnabledAsync(string deviceId, bool enabled)
+    {
+        var session = GetSession(deviceId);
+        if (session is null || session.Protocol < 2)
         {
             StatusChanged?.Invoke(
                 this,
-                _authenticated
-                    ? "当前手机端版本不支持接收 Windows 声音。"
-                    : "手机尚未连接，无法切换 Windows 声音播放。");
+                session is null
+                    ? "目标设备已经断开，无法切换播放。"
+                    : $"{session.Name} 的客户端版本不支持接收 Windows 声音。");
             return false;
         }
 
+        var revision = Interlocked.Increment(ref session.PlaybackCommandRevision);
         try
         {
-            await SendBinaryFrameAsync(new byte[] { 11, enabled ? (byte)1 : (byte)0 },
-                                       stream,
-                                       _lifetime.Token);
-            _playbackRequested = enabled;
-            if (!enabled)
+            await session.PlaybackCommandGate.WaitAsync(session.Cancellation.Token);
+            try
             {
-                UpdatePlaybackStreaming(false);
+                if (revision != Volatile.Read(ref session.PlaybackCommandRevision))
+                {
+                    return true;
+                }
+                await SendBinaryFrameAsync(
+                    new byte[] { 11, enabled ? (byte)1 : (byte)0 },
+                    session,
+                    session.Cancellation.Token);
             }
+            finally
+            {
+                session.PlaybackCommandGate.Release();
+            }
+            lock (_sessionsLock)
+            {
+                if (IsCurrentSessionLocked(session))
+                {
+                    session.PlaybackRequested = enabled;
+                    if (!enabled)
+                    {
+                        session.PlaybackStreaming = false;
+                    }
+                }
+            }
+            RaiseDevicesChanged();
+            RaiseAggregatePlaybackState();
             StatusChanged?.Invoke(
                 this,
-                enabled ? "已请求手机准备播放 Windows 声音。" : "已请求手机停止播放 Windows 声音。");
+                enabled
+                    ? $"已请求 {session.Name} 准备播放 Windows 声音。"
+                    : $"已请求 {session.Name} 停止播放 Windows 声音。");
             return true;
         }
-        catch (Exception exception) when (exception is IOException or SocketException)
+        catch (Exception exception) when (exception is IOException
+                                          or SocketException
+                                          or ObjectDisposedException
+                                          or OperationCanceledException)
         {
-            StatusChanged?.Invoke(this, $"向手机发送播放控制命令失败：{exception.Message}");
+            StatusChanged?.Invoke(this, $"向 {session.Name} 发送播放命令失败：{exception.Message}");
             return false;
         }
     }
 
+    public void SetMicrophoneGain(string deviceId, int gainPercent)
+    {
+        lock (_sessionsLock)
+        {
+            if (_sessions.TryGetValue(deviceId, out var session))
+            {
+                session.MicrophoneGainPercent = Math.Clamp(gainPercent, 0, 200);
+            }
+        }
+        RaiseDevicesChanged();
+    }
+
+    public void DisconnectDevice(string deviceId)
+    {
+        GetSession(deviceId)?.Stop();
+    }
+
     public void DisconnectPhone()
     {
-        var previousName = _phoneName;
-        var wasConnected = _authenticated || _client is not null;
-        lock (_clientLock)
+        DeviceSession[] sessions;
+        lock (_sessionsLock)
         {
-            _client?.Dispose();
-            _client = null;
-            _clientStream = null;
+            sessions = [.. _sessions.Values];
         }
-        ResetClientState();
-        if (wasConnected)
+        foreach (var session in sessions)
         {
-            ConnectionChanged?.Invoke(this, new PhoneConnectionChangedEventArgs(false, previousName));
-        }
-        if (!string.IsNullOrWhiteSpace(previousName))
-        {
-            StatusChanged?.Invoke(this, $"已断开手机：{previousName}");
+            session.Stop();
         }
     }
 
@@ -245,7 +401,7 @@ public sealed class PhonePairingService : IDisposable
     {
         DisconnectPhone();
         GenerateCredentials();
-        StatusChanged?.Invoke(this, "已生成新的手机配对凭据。");
+        StatusChanged?.Invoke(this, "已生成新的移动设备配对凭据。");
     }
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
@@ -255,16 +411,7 @@ public sealed class PhonePairingService : IDisposable
             while (!cancellationToken.IsCancellationRequested && _listener is not null)
             {
                 var incoming = await _listener.AcceptTcpClientAsync(cancellationToken);
-                lock (_clientLock)
-                {
-                    if (_client is not null)
-                    {
-                        _ = RejectAdditionalClientAsync(incoming, cancellationToken);
-                        continue;
-                    }
-                    _client = incoming;
-                    _clientStream = incoming.GetStream();
-                }
+                incoming.NoDelay = true;
                 _ = HandleClientAsync(incoming, cancellationToken);
             }
         }
@@ -274,41 +421,38 @@ public sealed class PhonePairingService : IDisposable
         }
         catch (SocketException exception)
         {
-            StatusChanged?.Invoke(this, $"手机配对监听已停止：{exception.Message}");
-        }
-    }
-
-    private static async Task RejectAdditionalClientAsync(
-        TcpClient client,
-        CancellationToken cancellationToken)
-    {
-        using (client)
-        {
-            var bytes = Encoding.UTF8.GetBytes("{\"type\":\"error\",\"message\":\"phone already connected\"}\n");
-            await client.GetStream().WriteAsync(bytes, cancellationToken);
+            StatusChanged?.Invoke(this, $"移动设备配对监听已停止：{exception.Message}");
         }
     }
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
     {
+        DeviceSession? deviceSession = null;
         var stream = client.GetStream();
         try
         {
             var handshake = await ReadLineAsync(stream, 4096, cancellationToken);
-            if (!TryAuthenticate(handshake, out var phoneName, out var protocol))
+            if (!TryAuthenticate(
+                    handshake,
+                    (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty,
+                    out var deviceId,
+                    out var deviceName,
+                    out var protocol))
             {
-                await SendJsonLineAsync(
-                    new { type = "error", message = "手机配对凭据不匹配" },
+                await SendUncoordinatedJsonLineAsync(
+                    new { type = "error", message = "移动设备配对凭据不匹配" },
                     stream,
                     cancellationToken);
                 return;
             }
 
-            _phoneName = phoneName;
-            _negotiatedProtocol = protocol;
-            _authenticated = true;
-            UpdateMicrophoneStreaming(false);
-            UpdatePlaybackStreaming(false);
+            deviceSession = new DeviceSession(
+                deviceId,
+                deviceName,
+                (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty,
+                protocol,
+                client,
+                CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token));
             await SendJsonLineAsync(
                 new
                 {
@@ -317,67 +461,105 @@ public sealed class PhonePairingService : IDisposable
                     sampleRate = RemoteSampleRate,
                     microphoneEnabled = false,
                     playbackEnabled = false,
+                    multiDevice = true,
                 },
-                stream,
+                deviceSession,
                 cancellationToken);
-            ConnectionChanged?.Invoke(this, new PhoneConnectionChangedEventArgs(true, phoneName));
-            StatusChanged?.Invoke(this, $"手机已连接：{phoneName}；音频链路保持关闭。");
+
+            DeviceSession? replacedSession = null;
+            lock (_sessionsLock)
+            {
+                if (_sessions.TryGetValue(deviceId, out var existing))
+                {
+                    replacedSession = existing;
+                }
+                _sessions[deviceId] = deviceSession;
+            }
+            replacedSession?.Stop();
+            deviceSession.PlaybackSendTask = PlaybackSendLoopAsync(deviceSession);
+            ConnectionChanged?.Invoke(
+                this,
+                new PhoneConnectionChangedEventArgs(true, deviceName, deviceId));
+            StatusChanged?.Invoke(this, $"移动设备已连接：{deviceName}；音频链路保持关闭。");
+            RaiseDevicesChanged();
 
             var lengthBytes = new byte[4];
-            while (!cancellationToken.IsCancellationRequested)
+            while (!deviceSession.Cancellation.IsCancellationRequested)
             {
-                if (!await TryReadExactlyAsync(stream, lengthBytes, cancellationToken))
+                if (!await TryReadExactlyAsync(
+                        stream,
+                        lengthBytes,
+                        deviceSession.Cancellation.Token))
                 {
                     break;
                 }
                 var bodyLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBytes);
                 if (bodyLength is < 1 or > MaximumFrameBytes)
                 {
-                    throw new InvalidDataException("手机数据帧长度无效。");
+                    throw new InvalidDataException("移动设备数据帧长度无效。");
                 }
 
                 var body = new byte[bodyLength];
-                if (!await TryReadExactlyAsync(stream, body, cancellationToken))
+                if (!await TryReadExactlyAsync(stream, body, deviceSession.Cancellation.Token))
                 {
                     break;
                 }
-                ProcessFrame(body);
+                ProcessFrame(deviceSession, body);
             }
         }
         catch (OperationCanceledException)
         {
-            // 应用退出或主动断开时不显示协议错误。
+            // 应用退出、设备重连或主动断开时不显示协议错误。
         }
-        catch (Exception exception) when (exception is IOException or SocketException or InvalidDataException)
+        catch (Exception exception) when (exception is IOException
+                                          or SocketException
+                                          or InvalidDataException
+                                          or ObjectDisposedException)
         {
-            StatusChanged?.Invoke(this, $"手机设备互联连接异常：{exception.Message}");
+            StatusChanged?.Invoke(this, $"移动设备连接异常：{exception.Message}");
         }
         finally
         {
-            var wasCurrentClient = false;
-            lock (_clientLock)
-            {
-                if (ReferenceEquals(_client, client))
-                {
-                    _client = null;
-                    _clientStream = null;
-                    wasCurrentClient = true;
-                }
-            }
             client.Dispose();
-            if (wasCurrentClient)
+            if (deviceSession is not null)
             {
-                var previousName = _phoneName;
-                ResetClientState();
-                ConnectionChanged?.Invoke(this, new PhoneConnectionChangedEventArgs(false, previousName));
-                StatusChanged?.Invoke(this, "手机连接已断开。");
+                var removed = false;
+                lock (_sessionsLock)
+                {
+                    if (_sessions.TryGetValue(deviceSession.Id, out var current)
+                        && ReferenceEquals(current, deviceSession))
+                    {
+                        _sessions.Remove(deviceSession.Id);
+                        removed = true;
+                    }
+                }
+                deviceSession.Stop();
+                if (removed)
+                {
+                    ConnectionChanged?.Invoke(
+                        this,
+                        new PhoneConnectionChangedEventArgs(
+                            false,
+                            deviceSession.Name,
+                            deviceSession.Id));
+                    StatusChanged?.Invoke(this, $"移动设备已断开：{deviceSession.Name}");
+                    RaiseDevicesChanged();
+                    RaiseAggregateMicrophoneState();
+                    RaiseAggregatePlaybackState();
+                }
             }
         }
     }
 
-    private bool TryAuthenticate(string handshake, out string phoneName, out int negotiatedProtocol)
+    private bool TryAuthenticate(
+        string handshake,
+        string remoteAddress,
+        out string deviceId,
+        out string deviceName,
+        out int negotiatedProtocol)
     {
-        phoneName = string.Empty;
+        deviceId = string.Empty;
+        deviceName = string.Empty;
         negotiatedProtocol = 1;
         try
         {
@@ -399,63 +581,85 @@ public sealed class PhonePairingService : IDisposable
             }
 
             negotiatedProtocol = protocolValue;
-
-            phoneName = root.TryGetProperty("deviceName", out var name)
+            deviceName = root.TryGetProperty("deviceName", out var name)
                 ? name.GetString() ?? string.Empty
                 : string.Empty;
-            if (string.IsNullOrWhiteSpace(phoneName))
+            if (string.IsNullOrWhiteSpace(deviceName))
             {
-                phoneName = "Android 手机";
+                deviceName = "Android 设备";
+            }
+            deviceName = new string(deviceName
+                .Trim()
+                .Take(80)
+                .Where(character => !char.IsControl(character))
+                .ToArray());
+
+            deviceId = root.TryGetProperty("deviceId", out var identifier)
+                ? identifier.GetString() ?? string.Empty
+                : string.Empty;
+            deviceId = NormalizeDeviceId(deviceId);
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                var legacyIdentity = Encoding.UTF8.GetBytes($"{deviceName}|{remoteAddress}");
+                deviceId = $"legacy-{Convert.ToHexString(SHA256.HashData(legacyIdentity))[..16]}";
             }
             return true;
         }
-        catch (JsonException)
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
         {
             return false;
         }
     }
 
-    private void ProcessFrame(byte[] body)
+    private void ProcessFrame(DeviceSession session, byte[] body)
     {
+        session.LastSeen = DateTimeOffset.UtcNow;
         switch (body[0])
         {
             case 1 when body.Length >= 13:
-                ProcessPcmFrame(body);
+                ProcessPcmFrame(session, body);
                 break;
             case 2 when body.Length >= 2:
-                UpdateMicrophoneStreaming(body[1] != 0);
+                UpdateMicrophoneStreaming(session, body[1] != 0);
                 break;
             case 3:
-                StatusChanged?.Invoke(this, $"手机麦克风：{Encoding.UTF8.GetString(body, 1, body.Length - 1)}");
-                UpdateMicrophoneStreaming(false);
+                StatusChanged?.Invoke(
+                    this,
+                    $"{session.Name} 麦克风：{Encoding.UTF8.GetString(body, 1, body.Length - 1)}");
+                UpdateMicrophoneStreaming(session, false);
                 break;
-            case 4 when body.Length >= 17 && _microphoneStreaming:
-                _audioEngine.AddRemoteMicrophoneClockSample(
-                    BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(1, 8)),
-                    BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(9, 8)));
+            case 4 when body.Length >= 17 && session.MicrophoneStreaming:
+                ProcessClockFrame(session, body);
                 break;
             case 5 when body.Length >= 2:
-                UpdatePlaybackStreaming(body[1] != 0);
+                UpdatePlaybackStreaming(session, body[1] != 0);
                 break;
             case 6:
-                StatusChanged?.Invoke(this, $"手机播放：{Encoding.UTF8.GetString(body, 1, body.Length - 1)}");
-                _playbackRequested = false;
-                UpdatePlaybackStreaming(false);
+                StatusChanged?.Invoke(
+                    this,
+                    $"{session.Name} 播放：{Encoding.UTF8.GetString(body, 1, body.Length - 1)}");
+                lock (_sessionsLock)
+                {
+                    session.PlaybackRequested = false;
+                }
+                UpdatePlaybackStreaming(session, false);
                 break;
         }
     }
 
-    private void ProcessPcmFrame(byte[] body)
+    private void ProcessPcmFrame(DeviceSession session, byte[] body)
     {
-        if (!_microphoneStreaming)
+        if (!session.MicrophoneStreaming)
         {
             return;
         }
 
-        var firstFrame = BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(1, 8));
         var sampleRate = BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(9, 4));
         var pcmBytes = body.Length - 13;
-        if (sampleRate is < 8000 or > 192_000 || pcmBytes <= 0 || pcmBytes % 2 != 0)
+        if (sampleRate != RemoteSampleRate
+            || pcmBytes <= 0
+            || pcmBytes > MaximumMicrophoneFrameBytes
+            || pcmBytes % 2 != 0)
         {
             return;
         }
@@ -469,101 +673,224 @@ public sealed class PhonePairingService : IDisposable
             var value = sample / 32768.0;
             energy += value * value;
         }
-        _audioEngine.AppendRemoteMicrophonePcm16(firstFrame, sampleRate, samples);
-        var rms = Math.Sqrt(energy / samples.Length);
-        MicrophoneLevelChanged?.Invoke(this, rms > 0.000001 ? 20 * Math.Log10(rms) : -120);
+        session.MicrophoneSamples.Append(samples);
+
+        lock (_sessionsLock)
+        {
+            session.MicrophoneLevelDbfs = energy > 0
+                ? 20 * Math.Log10(Math.Sqrt(energy / samples.Length))
+                : -120;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        var minimumInterval = Stopwatch.Frequency / 10;
+        if (now - Interlocked.Read(ref session.LastLevelNotificationTick) >= minimumInterval)
+        {
+            Interlocked.Exchange(ref session.LastLevelNotificationTick, now);
+            RaiseDevicesChanged();
+            RaiseAggregateMicrophoneLevel();
+        }
     }
 
-    private void UpdateMicrophoneStreaming(bool enabled)
+    private void ProcessClockFrame(DeviceSession session, byte[] body)
     {
-        if (_microphoneStreaming == enabled)
+        var frameIndex = BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(1, 8));
+        var monotonicNanoseconds = BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(9, 8));
+        session.ClockEstimator.Add(frameIndex, monotonicNanoseconds);
+        lock (_sessionsLock)
         {
+            session.ClockDriftPpm = session.ClockEstimator.DriftPpm;
+        }
+    }
+
+    private void UpdateMicrophoneStreaming(DeviceSession session, bool enabled)
+    {
+        bool changed;
+        lock (_sessionsLock)
+        {
+            if (!IsCurrentSessionLocked(session))
+            {
+                return;
+            }
+            changed = session.MicrophoneStreaming != enabled;
+            session.MicrophoneStreaming = enabled;
             if (!enabled)
             {
-                _audioEngine.SetRemoteMicrophoneConnected(false);
+                session.MicrophoneLevelDbfs = -120;
+                session.MicrophoneSamples.Clear();
             }
-            return;
         }
-
-        _microphoneStreaming = enabled;
-        _audioEngine.SetRemoteMicrophoneConnected(enabled, RemoteSampleRate);
-        if (!enabled)
-        {
-            MicrophoneLevelChanged?.Invoke(this, -160);
-        }
-        MicrophoneStreamingChanged?.Invoke(this, enabled);
-        StatusChanged?.Invoke(
-            this,
-            enabled ? "手机麦克风已启用并开始回传。" : "手机麦克风已停止并释放。");
-    }
-
-    private void UpdatePlaybackStreaming(bool enabled)
-    {
-        if (_playbackStreaming == enabled)
+        if (!changed)
         {
             return;
         }
 
-        _playbackStreaming = enabled;
-        PlaybackStreamingChanged?.Invoke(this, enabled);
+        RaiseDevicesChanged();
+        RaiseAggregateMicrophoneState();
+        RaiseAggregateMicrophoneLevel();
         StatusChanged?.Invoke(
             this,
-            enabled ? "手机已准备播放 Windows 声音。" : "手机已停止播放 Windows 声音。");
+            enabled
+                ? $"{session.Name} 麦克风已启用并开始回传。"
+                : $"{session.Name} 麦克风已停止并释放。");
     }
 
-    private void SystemAudioSource_FrameReady(object? sender, SystemAudioFrameEventArgs args)
+    private void UpdatePlaybackStreaming(DeviceSession session, bool enabled)
     {
-        if (_playbackRequested && _authenticated && _negotiatedProtocol >= 2)
+        bool changed;
+        lock (_sessionsLock)
         {
-            _playbackFrames.Writer.TryWrite(args);
+            if (!IsCurrentSessionLocked(session))
+            {
+                return;
+            }
+            changed = session.PlaybackStreaming != enabled;
+            session.PlaybackStreaming = enabled;
         }
+        if (!changed)
+        {
+            return;
+        }
+
+        RaiseDevicesChanged();
+        RaiseAggregatePlaybackState();
+        StatusChanged?.Invoke(
+            this,
+            enabled
+                ? $"{session.Name} 已准备播放 Windows 声音。"
+                : $"{session.Name} 已停止播放 Windows 声音。");
     }
 
-    private async Task PlaybackSendLoopAsync(CancellationToken cancellationToken)
+    private async Task MicrophoneMixerLoopAsync(CancellationToken cancellationToken)
     {
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(10));
         try
         {
-            await foreach (var frame in _playbackFrames.Reader.ReadAllAsync(cancellationToken))
+            while (await timer.WaitForNextTickAsync(cancellationToken))
             {
-                var stream = _clientStream;
-                if (!_playbackRequested || !_authenticated || stream is null || _negotiatedProtocol < 2)
+                DeviceSession[] active;
+                lock (_sessionsLock)
+                {
+                    active = _sessions.Values
+                        .Where(session => session.MicrophoneStreaming)
+                        .ToArray();
+                }
+                if (active.Length == 0)
                 {
                     continue;
                 }
-                if (frame.Samples.Length > (MaximumFrameBytes - 14) / sizeof(short))
+
+                var sum = new double[MixerChunkFrames];
+                var hasSamples = false;
+                foreach (var session in active)
                 {
-                    StatusChanged?.Invoke(this, "Windows 音频包过大，已丢弃该包。");
+                    var chunk = new short[MixerChunkFrames];
+                    if (session.MicrophoneSamples.Read(chunk) == 0)
+                    {
+                        continue;
+                    }
+                    hasSamples = true;
+                    var gain = session.MicrophoneGainPercent / 100.0;
+                    for (var index = 0; index < chunk.Length; index++)
+                    {
+                        sum[index] += chunk[index] * gain;
+                    }
+                }
+                if (!hasSamples)
+                {
                     continue;
                 }
 
-                var body = new byte[14 + frame.Samples.Length * sizeof(short)];
-                body[0] = 12;
-                BinaryPrimitives.WriteUInt64BigEndian(body.AsSpan(1, 8), frame.FirstFrameIndex);
-                BinaryPrimitives.WriteUInt32BigEndian(body.AsSpan(9, 4), frame.SampleRate);
-                body[13] = checked((byte)frame.Channels);
-                for (var index = 0; index < frame.Samples.Length; index++)
+                var normalization = 1.0 / Math.Sqrt(active.Length);
+                var mixed = new short[MixerChunkFrames];
+                for (var index = 0; index < mixed.Length; index++)
                 {
-                    BinaryPrimitives.WriteInt16LittleEndian(
-                        body.AsSpan(14 + index * sizeof(short), sizeof(short)),
-                        frame.Samples[index]);
+                    mixed[index] = (short)Math.Clamp(
+                        Math.Round(sum[index] * normalization),
+                        short.MinValue,
+                        short.MaxValue);
                 }
-
-                try
-                {
-                    await SendBinaryFrameAsync(body, stream, cancellationToken);
-                }
-                catch (Exception exception) when (exception is IOException or SocketException)
-                {
-                    StatusChanged?.Invoke(this, $"Windows 声音发送失败：{exception.Message}");
-                    _playbackRequested = false;
-                    UpdatePlaybackStreaming(false);
-                }
+                _audioEngine.PushRemoteMicrophoneOutputPcm16(RemoteSampleRate, mixed);
             }
         }
         catch (OperationCanceledException)
         {
-            // 应用退出时停止发送循环属于正常生命周期。
+            // 应用退出时停止混音器属于正常生命周期。
         }
+    }
+
+    private void SystemAudioSource_FrameReady(object? sender, SystemAudioFrameEventArgs args)
+    {
+        var body = CreatePlaybackFrame(args);
+        if (body is null)
+        {
+            StatusChanged?.Invoke(this, "Windows 音频包过大，已丢弃该包。");
+            return;
+        }
+
+        DeviceSession[] targets;
+        lock (_sessionsLock)
+        {
+            targets = _sessions.Values
+                .Where(session => session.PlaybackRequested && session.Protocol >= 2)
+                .ToArray();
+        }
+        foreach (var session in targets)
+        {
+            session.PlaybackFrames.Writer.TryWrite(body);
+        }
+    }
+
+    private async Task PlaybackSendLoopAsync(DeviceSession session)
+    {
+        try
+        {
+            await foreach (var body in session.PlaybackFrames.Reader.ReadAllAsync(
+                               session.Cancellation.Token))
+            {
+                if (!session.PlaybackRequested)
+                {
+                    continue;
+                }
+                await SendBinaryFrameAsync(body, session, session.Cancellation.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 设备断开时停止独立发送循环属于正常生命周期。
+        }
+        catch (Exception exception) when (exception is IOException or SocketException or ObjectDisposedException)
+        {
+            lock (_sessionsLock)
+            {
+                session.PlaybackRequested = false;
+                session.PlaybackStreaming = false;
+            }
+            StatusChanged?.Invoke(this, $"向 {session.Name} 发送 Windows 声音失败：{exception.Message}");
+            RaiseDevicesChanged();
+            RaiseAggregatePlaybackState();
+        }
+    }
+
+    private static byte[]? CreatePlaybackFrame(SystemAudioFrameEventArgs frame)
+    {
+        if (frame.Samples.Length > (MaximumFrameBytes - 14) / sizeof(short))
+        {
+            return null;
+        }
+
+        var body = new byte[14 + frame.Samples.Length * sizeof(short)];
+        body[0] = 12;
+        BinaryPrimitives.WriteUInt64BigEndian(body.AsSpan(1, 8), frame.FirstFrameIndex);
+        BinaryPrimitives.WriteUInt32BigEndian(body.AsSpan(9, 4), frame.SampleRate);
+        body[13] = checked((byte)frame.Channels);
+        for (var index = 0; index < frame.Samples.Length; index++)
+        {
+            BinaryPrimitives.WriteInt16LittleEndian(
+                body.AsSpan(14 + index * sizeof(short), sizeof(short)),
+                frame.Samples[index]);
+        }
+        return body;
     }
 
     private async Task DiscoveryLoopAsync(CancellationToken cancellationToken)
@@ -612,46 +939,142 @@ public sealed class PhonePairingService : IDisposable
         }
         catch (SocketException exception)
         {
-            StatusChanged?.Invoke(this, $"手机发现服务已停止：{exception.Message}");
+            StatusChanged?.Invoke(this, $"移动设备发现服务已停止：{exception.Message}");
         }
     }
 
-    private async Task SendJsonLineAsync(object value, NetworkStream stream, CancellationToken cancellationToken)
+    private DeviceSession? GetFirstSession(bool requirePlayback = false)
+    {
+        lock (_sessionsLock)
+        {
+            return _sessions.Values
+                .Where(session => !requirePlayback || session.Protocol >= 2)
+                .OrderBy(session => session.ConnectedAt)
+                .FirstOrDefault();
+        }
+    }
+
+    private DeviceSession? GetSession(string deviceId)
+    {
+        lock (_sessionsLock)
+        {
+            return _sessions.TryGetValue(deviceId, out var session) ? session : null;
+        }
+    }
+
+    private bool IsCurrentSessionLocked(DeviceSession session) =>
+        _sessions.TryGetValue(session.Id, out var current) && ReferenceEquals(current, session);
+
+    private void RaiseDevicesChanged()
+    {
+        IReadOnlyList<PhoneDeviceSnapshot> snapshots;
+        lock (_sessionsLock)
+        {
+            snapshots = CreateSnapshotsLocked();
+        }
+        DevicesChanged?.Invoke(this, new PhoneDevicesChangedEventArgs(snapshots));
+    }
+
+    private PhoneDeviceSnapshot[] CreateSnapshotsLocked() =>
+        _sessions.Values
+            .OrderBy(session => session.ConnectedAt)
+            .Select(session => new PhoneDeviceSnapshot(
+                session.Id,
+                session.Name,
+                session.RemoteAddress,
+                session.Protocol,
+                session.MicrophoneStreaming,
+                session.PlaybackRequested,
+                session.PlaybackStreaming,
+                session.MicrophoneGainPercent,
+                session.MicrophoneLevelDbfs,
+                session.ClockDriftPpm,
+                session.MicrophoneSamples.BufferedMilliseconds,
+                session.ConnectedAt))
+            .ToArray();
+
+    private void RaiseAggregateMicrophoneState() =>
+        MicrophoneStreamingChanged?.Invoke(this, IsMicrophoneStreaming);
+
+    private void RaiseAggregatePlaybackState() =>
+        PlaybackStreamingChanged?.Invoke(this, IsPlaybackStreaming);
+
+    private void RaiseAggregateMicrophoneLevel()
+    {
+        double level;
+        lock (_sessionsLock)
+        {
+            level = _sessions.Values
+                .Where(session => session.MicrophoneStreaming)
+                .Select(session => session.MicrophoneLevelDbfs)
+                .DefaultIfEmpty(-120)
+                .Max();
+        }
+        MicrophoneLevelChanged?.Invoke(this, level);
+    }
+
+    private static string NormalizeDeviceId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+        return new string(value
+            .Trim()
+            .Take(128)
+            .Where(character => char.IsLetterOrDigit(character) || character is '-' or '_' or '.')
+            .ToArray());
+    }
+
+    private static async Task SendJsonLineAsync(
+        object value,
+        DeviceSession session,
+        CancellationToken cancellationToken)
     {
         var payload = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
-        await _sendGate.WaitAsync(cancellationToken);
+        await session.SendGate.WaitAsync(cancellationToken);
         try
         {
-            await stream.WriteAsync(payload, cancellationToken);
-            await stream.WriteAsync("\n"u8.ToArray(), cancellationToken);
+            await session.Stream.WriteAsync(payload, cancellationToken);
+            await session.Stream.WriteAsync("\n"u8.ToArray(), cancellationToken);
         }
         finally
         {
-            _sendGate.Release();
+            session.SendGate.Release();
         }
     }
 
-    private async Task SendBinaryFrameAsync(
-        ReadOnlyMemory<byte> body,
+    private static async Task SendUncoordinatedJsonLineAsync(
+        object value,
         NetworkStream stream,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
+        await stream.WriteAsync(payload, cancellationToken);
+        await stream.WriteAsync("\n"u8.ToArray(), cancellationToken);
+    }
+
+    private static async Task SendBinaryFrameAsync(
+        ReadOnlyMemory<byte> body,
+        DeviceSession session,
         CancellationToken cancellationToken)
     {
         if (body.Length is < 1 or > MaximumFrameBytes)
         {
-            throw new InvalidDataException("发送给手机的数据帧长度无效。");
+            throw new InvalidDataException("发送给移动设备的数据帧长度无效。");
         }
 
         var length = new byte[4];
         BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)body.Length));
-        await _sendGate.WaitAsync(cancellationToken);
+        await session.SendGate.WaitAsync(cancellationToken);
         try
         {
-            await stream.WriteAsync(length, cancellationToken);
-            await stream.WriteAsync(body, cancellationToken);
+            await session.Stream.WriteAsync(length, cancellationToken);
+            await session.Stream.WriteAsync(body, cancellationToken);
         }
         finally
         {
-            _sendGate.Release();
+            session.SendGate.Release();
         }
     }
 
@@ -667,7 +1090,7 @@ public sealed class PhonePairingService : IDisposable
             var read = await stream.ReadAsync(singleByte, cancellationToken);
             if (read == 0)
             {
-                throw new IOException("手机在握手完成前断开连接。");
+                throw new IOException("移动设备在握手完成前断开连接。");
             }
             if (singleByte[0] == (byte)'\n')
             {
@@ -675,7 +1098,7 @@ public sealed class PhonePairingService : IDisposable
             }
             buffer.WriteByte(singleByte[0]);
         }
-        throw new InvalidDataException("手机握手数据过长。");
+        throw new InvalidDataException("移动设备握手数据过长。");
     }
 
     private static async Task<bool> TryReadExactlyAsync(
@@ -694,16 +1117,6 @@ public sealed class PhonePairingService : IDisposable
             offset += read;
         }
         return true;
-    }
-
-    private void ResetClientState()
-    {
-        _authenticated = false;
-        _phoneName = string.Empty;
-        _negotiatedProtocol = 1;
-        _playbackRequested = false;
-        UpdateMicrophoneStreaming(false);
-        UpdatePlaybackStreaming(false);
     }
 
     private void GenerateCredentials()
@@ -787,13 +1200,195 @@ public sealed class PhonePairingService : IDisposable
         _discovery = null;
         try
         {
-            _playbackSendTask.GetAwaiter().GetResult();
+            _microphoneMixerTask.GetAwaiter().GetResult();
         }
         catch (OperationCanceledException)
         {
-            // 关闭过程中取消发送循环属于正常生命周期。
+            // 关闭过程中取消混音器属于正常生命周期。
         }
-        _sendGate.Dispose();
         _lifetime.Dispose();
+    }
+
+    private sealed class DeviceSession(
+        string id,
+        string name,
+        string remoteAddress,
+        int protocol,
+        TcpClient client,
+        CancellationTokenSource cancellation)
+    {
+        private int _stopped;
+
+        public string Id { get; } = id;
+
+        public string Name { get; } = name;
+
+        public string RemoteAddress { get; } = remoteAddress;
+
+        public int Protocol { get; } = protocol;
+
+        public TcpClient Client { get; } = client;
+
+        public NetworkStream Stream { get; } = client.GetStream();
+
+        public CancellationTokenSource Cancellation { get; } = cancellation;
+
+        public SemaphoreSlim SendGate { get; } = new(1, 1);
+
+        public SemaphoreSlim MicrophoneCommandGate { get; } = new(1, 1);
+
+        public SemaphoreSlim PlaybackCommandGate { get; } = new(1, 1);
+
+        public long MicrophoneCommandRevision;
+
+        public long PlaybackCommandRevision;
+
+        public Channel<byte[]> PlaybackFrames { get; } =
+            Channel.CreateBounded<byte[]>(new BoundedChannelOptions(12)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+                SingleWriter = false,
+            });
+
+        public PcmSampleQueue MicrophoneSamples { get; } = new();
+
+        public RemoteClockEstimator ClockEstimator { get; } = new();
+
+        public DateTimeOffset ConnectedAt { get; } = DateTimeOffset.UtcNow;
+
+        public DateTimeOffset LastSeen { get; set; } = DateTimeOffset.UtcNow;
+
+        public bool MicrophoneStreaming { get; set; }
+
+        public volatile bool PlaybackRequested;
+
+        public bool PlaybackStreaming { get; set; }
+
+        public int MicrophoneGainPercent { get; set; } = 100;
+
+        public double MicrophoneLevelDbfs { get; set; } = -120;
+
+        public double ClockDriftPpm { get; set; }
+
+        public long LastLevelNotificationTick;
+
+        public Task? PlaybackSendTask { get; set; }
+
+        public void Stop()
+        {
+            if (Interlocked.Exchange(ref _stopped, 1) != 0)
+            {
+                return;
+            }
+            PlaybackFrames.Writer.TryComplete();
+            Cancellation.Cancel();
+            Client.Dispose();
+        }
+    }
+
+    private sealed class PcmSampleQueue
+    {
+        private const int MaximumFrames = (int)RemoteSampleRate * 2;
+        private const int TargetFrames = MixerChunkFrames * 4;
+        private readonly object _gate = new();
+        private readonly Queue<short> _samples = new();
+        private bool _primed;
+
+        public int BufferedMilliseconds
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return (int)Math.Round(_samples.Count * 1000.0 / RemoteSampleRate);
+                }
+            }
+        }
+
+        public void Append(ReadOnlySpan<short> samples)
+        {
+            lock (_gate)
+            {
+                foreach (var sample in samples)
+                {
+                    _samples.Enqueue(sample);
+                }
+                while (_samples.Count > MaximumFrames)
+                {
+                    _samples.Dequeue();
+                }
+            }
+        }
+
+        public int Read(Span<short> destination)
+        {
+            lock (_gate)
+            {
+                if (_samples.Count > TargetFrames + MixerChunkFrames * 4)
+                {
+                    while (_samples.Count > TargetFrames)
+                    {
+                        _samples.Dequeue();
+                    }
+                }
+                if (!_primed)
+                {
+                    if (_samples.Count < TargetFrames)
+                    {
+                        return 0;
+                    }
+                    _primed = true;
+                }
+                var count = Math.Min(destination.Length, _samples.Count);
+                for (var index = 0; index < count; index++)
+                {
+                    destination[index] = _samples.Dequeue();
+                }
+                if (count < destination.Length)
+                {
+                    _primed = false;
+                }
+                return count;
+            }
+        }
+
+        public void Clear()
+        {
+            lock (_gate)
+            {
+                _samples.Clear();
+                _primed = false;
+            }
+        }
+    }
+
+    private sealed class RemoteClockEstimator
+    {
+        private ulong _previousFrame;
+        private ulong _previousNanoseconds;
+        private double _driftPpm;
+
+        public double DriftPpm => _driftPpm;
+
+        public void Add(ulong frame, ulong nanoseconds)
+        {
+            if (_previousNanoseconds != 0
+                && frame > _previousFrame
+                && nanoseconds > _previousNanoseconds)
+            {
+                var seconds = (nanoseconds - _previousNanoseconds) / 1_000_000_000.0;
+                var measuredRate = (frame - _previousFrame) / seconds;
+                var measuredDrift = (measuredRate / RemoteSampleRate - 1.0) * 1_000_000.0;
+                if (double.IsFinite(measuredDrift) && Math.Abs(measuredDrift) <= 10_000)
+                {
+                    _driftPpm = _driftPpm == 0
+                        ? measuredDrift
+                        : _driftPpm * 0.8 + measuredDrift * 0.2;
+                }
+            }
+            _previousFrame = frame;
+            _previousNanoseconds = nanoseconds;
+        }
     }
 }

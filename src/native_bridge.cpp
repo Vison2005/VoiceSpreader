@@ -453,6 +453,27 @@ void __cdecl VS_AppendRemoteMicrophonePcm16(
     value->remoteMicrophone->append(firstFrameIndex,
                                     sampleRate,
                                     normalized);
+}
+
+void __cdecl VS_PushRemoteMicrophoneOutputPcm16(
+    void* handle,
+    std::uint32_t sampleRate,
+    const std::int16_t* samples,
+    int sampleCount)
+{
+    BridgeHandle* value = bridge(handle);
+    if (value == nullptr || value->remoteMicrophoneOutput == nullptr
+        || samples == nullptr || sampleCount <= 0) {
+        return;
+    }
+
+    std::vector<float> normalized(static_cast<std::size_t>(sampleCount));
+    std::transform(samples,
+                   samples + sampleCount,
+                   normalized.begin(),
+                   [](std::int16_t sample) {
+                       return static_cast<float>(sample) / 32768.0F;
+                   });
     if (value->remoteMicrophoneOutput != nullptr) {
         value->remoteMicrophoneOutput->push(sampleRate, normalized);
     }

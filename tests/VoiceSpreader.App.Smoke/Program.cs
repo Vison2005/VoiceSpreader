@@ -57,19 +57,23 @@ var accepted = await ReadLineAsync(stream);
 Require(accepted.Contains("\"accepted\"", StringComparison.Ordinal), "TCP 握手未被接受");
 
 await stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
-await WaitForAsync(() => sink.Connected, "手机麦克风启用状态未写入原生缓冲");
+await WaitForAsync(() => service.IsMicrophoneStreaming, "手机麦克风启用状态未写入会话");
 
-var pcm = new short[] { 0, 16384, -16384, 32767, -32768 };
+var pcmPrefix = new short[] { 0, 16384, -16384, 32767, -32768 };
+var pcm = new short[1920];
+pcmPrefix.CopyTo(pcm, 0);
 await stream.WriteAsync(CreatePcmFrame(123456, 48000, pcm));
 await stream.WriteAsync(CreateClockFrame(123456, 1_000_000_000));
-await WaitForAsync(() => sink.Samples.SequenceEqual(pcm), "PCM 数据未抵达远程缓冲接口");
-await WaitForAsync(() => sink.ClockFrameIndex == 123456, "手机时钟样本未抵达远程缓冲接口");
+await stream.WriteAsync(CreateClockFrame(123936, 1_010_000_000));
+await WaitForAsync(
+    () => sink.MixedSamples.Take(pcmPrefix.Length).SequenceEqual(pcmPrefix),
+    "PCM 数据未抵达 VB-CABLE 集中混音接口");
 
 Require(await service.SetMicrophoneEnabledAsync(false), "桌面端无法发送麦克风停用命令");
 var command = await ReadLineAsync(stream);
 Require(command.Contains("\"enabled\":false", StringComparison.Ordinal), "麦克风停用命令格式无效");
 await stream.WriteAsync(CreateMicrophoneStateFrame(enabled: false));
-await WaitForAsync(() => !sink.Connected, "手机麦克风停用状态未写入原生缓冲");
+await WaitForAsync(() => !service.IsMicrophoneStreaming, "手机麦克风停用状态未写入会话");
 service.DisconnectPhone();
 await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -82,6 +86,7 @@ var protocol2Hello = JsonSerializer.SerializeToUtf8Bytes(new
     protocol = 2,
     session = payloadParts[3],
     secret = payloadParts[4],
+    deviceId = "phone-1",
     deviceName = "WinUI protocol 2 phone",
 });
 await protocol2Stream.WriteAsync(protocol2Hello);
@@ -90,14 +95,14 @@ var protocol2Accepted = await ReadLineAsync(protocol2Stream);
 Require(protocol2Accepted.Contains("\"protocol\":2", StringComparison.Ordinal),
     "TCP v2 握手未协商二进制下行协议");
 
-Require(await service.SetMicrophoneEnabledAsync(true), "桌面端无法发送 v2 麦克风启用命令");
+Require(await service.SetMicrophoneEnabledAsync("phone-1", true), "桌面端无法发送 v2 麦克风启用命令");
 var protocol2MicrophoneCommand = await ReadBinaryFrameAsync(protocol2Stream);
 Require(protocol2MicrophoneCommand.SequenceEqual(new byte[] { 10, 1 }),
     "v2 麦克风启用命令格式无效");
 await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
-await WaitForAsync(() => sink.Connected, "v2 手机麦克风启用状态未写入原生缓冲");
+await WaitForAsync(() => service.IsMicrophoneStreaming, "v2 手机麦克风启用状态未写入会话");
 
-Require(await service.SetPlaybackEnabledAsync(true), "桌面端无法发送手机播放启用命令");
+Require(await service.SetPlaybackEnabledAsync("phone-1", true), "桌面端无法发送手机播放启用命令");
 var playbackCommand = await ReadBinaryFrameAsync(protocol2Stream);
 Require(playbackCommand.SequenceEqual(new byte[] { 11, 1 }), "手机播放启用命令格式无效");
 
@@ -115,10 +120,57 @@ Require(BinaryPrimitives.ReadInt16LittleEndian(playbackFrame.AsSpan(14, 2)) == 1
 
 await protocol2Stream.WriteAsync(CreatePlaybackStateFrame(enabled: true));
 await WaitForAsync(() => service.IsPlaybackStreaming, "手机播放就绪状态未写入桌面端");
-Require(await service.SetPlaybackEnabledAsync(false), "桌面端无法发送手机播放停用命令");
+
+using var tabletClient = new TcpClient();
+await tabletClient.ConnectAsync(IPAddress.Loopback, service.ServerPort);
+var tabletStream = tabletClient.GetStream();
+var tabletHello = JsonSerializer.SerializeToUtf8Bytes(new
+{
+    type = "hello",
+    protocol = 2,
+    session = payloadParts[3],
+    secret = payloadParts[4],
+    deviceId = "tablet-1",
+    deviceName = "WinUI protocol 2 tablet",
+});
+await tabletStream.WriteAsync(tabletHello);
+await tabletStream.WriteAsync("\n"u8.ToArray());
+var tabletAccepted = await ReadLineAsync(tabletStream);
+Require(tabletAccepted.Contains("\"multiDevice\":true", StringComparison.Ordinal),
+    "TCP v2 握手未声明多设备能力");
+await WaitForAsync(() => service.ConnectedDevices.Count == 2, "服务端没有同时保留两台设备");
+
+service.SetMicrophoneGain("phone-1", 100);
+service.SetMicrophoneGain("tablet-1", 50);
+Require(await service.SetMicrophoneEnabledAsync("tablet-1", true), "桌面端无法启用第二台设备麦克风");
+Require((await ReadBinaryFrameAsync(tabletStream)).SequenceEqual(new byte[] { 10, 1 }),
+    "第二台设备麦克风命令格式无效");
+await tabletStream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
+await protocol2Stream.WriteAsync(CreatePcmFrame(124000, 48_000, Enumerable.Repeat((short)1000, 1920).ToArray()));
+await tabletStream.WriteAsync(CreatePcmFrame(224000, 48_000, Enumerable.Repeat((short)2000, 1920).ToArray()));
+await WaitForAsync(
+    () => sink.MixedSamples.FirstOrDefault() is >= 1413 and <= 1415,
+    "多设备麦克风没有按固定增益进入集中混音输出");
+
+Require(await service.SetPlaybackEnabledAsync("tablet-1", true), "桌面端无法启用第二台设备播放");
+Require((await ReadBinaryFrameAsync(tabletStream)).SequenceEqual(new byte[] { 11, 1 }),
+    "第二台设备播放命令格式无效");
+systemAudio.Emit(new SystemAudioFrameEventArgs(960, 48_000, 2, playbackPcm));
+var phoneBroadcastFrame = await ReadBinaryFrameAsync(protocol2Stream);
+var tabletBroadcastFrame = await ReadBinaryFrameAsync(tabletStream);
+Require(phoneBroadcastFrame[0] == 12 && tabletBroadcastFrame[0] == 12,
+    "Windows 音频没有广播到所有选中的设备");
+
+Require(await service.SetPlaybackEnabledAsync("tablet-1", false), "桌面端无法停止第二台设备播放");
+Require((await ReadBinaryFrameAsync(tabletStream)).SequenceEqual(new byte[] { 11, 0 }),
+    "第二台设备播放停用命令格式无效");
+Require(await service.SetPlaybackEnabledAsync("phone-1", false), "桌面端无法发送手机播放停用命令");
 var stopPlaybackCommand = await ReadBinaryFrameAsync(protocol2Stream);
 Require(stopPlaybackCommand.SequenceEqual(new byte[] { 11, 0 }), "手机播放停用命令格式无效");
-Require(await service.SetMicrophoneEnabledAsync(false), "桌面端无法发送 v2 麦克风停用命令");
+Require(await service.SetMicrophoneEnabledAsync("tablet-1", false), "桌面端无法停止第二台设备麦克风");
+Require((await ReadBinaryFrameAsync(tabletStream)).SequenceEqual(new byte[] { 10, 0 }),
+    "第二台设备麦克风停用命令格式无效");
+Require(await service.SetMicrophoneEnabledAsync("phone-1", false), "桌面端无法发送 v2 麦克风停用命令");
 var stopProtocol2MicrophoneCommand = await ReadBinaryFrameAsync(protocol2Stream);
 Require(stopProtocol2MicrophoneCommand.SequenceEqual(new byte[] { 10, 0 }),
     "v2 麦克风停用命令格式无效");
@@ -222,46 +274,25 @@ static void Require(bool condition, string message)
 file sealed class RecordingRemoteMicrophoneSink : IRemoteMicrophoneSink
 {
     private readonly object _gate = new();
-    private bool _connected;
-    private short[] _samples = [];
-    private ulong _clockFrameIndex;
+    private int _mixedFrameCount;
+    private short[] _mixedSamples = [];
 
-    public bool Connected
+    public short[] MixedSamples
     {
-        get { lock (_gate) { return _connected; } }
+        get { lock (_gate) { return [.. _mixedSamples]; } }
     }
 
-    public short[] Samples
+    public int MixedFrameCount
     {
-        get { lock (_gate) { return [.. _samples]; } }
+        get { lock (_gate) { return _mixedFrameCount; } }
     }
 
-    public ulong ClockFrameIndex
-    {
-        get { lock (_gate) { return _clockFrameIndex; } }
-    }
-
-    public void SetRemoteMicrophoneConnected(bool connected, uint sampleRate = 48_000)
+    public void PushRemoteMicrophoneOutputPcm16(uint sampleRate, short[] samples)
     {
         lock (_gate)
         {
-            _connected = connected;
-        }
-    }
-
-    public void AddRemoteMicrophoneClockSample(ulong frameIndex, ulong monotonicNanoseconds)
-    {
-        lock (_gate)
-        {
-            _clockFrameIndex = frameIndex;
-        }
-    }
-
-    public void AppendRemoteMicrophonePcm16(ulong firstFrameIndex, uint sampleRate, short[] samples)
-    {
-        lock (_gate)
-        {
-            _samples = [.. samples];
+            _mixedSamples = [.. samples];
+            _mixedFrameCount++;
         }
     }
 }

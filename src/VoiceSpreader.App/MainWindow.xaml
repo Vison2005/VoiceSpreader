@@ -17,7 +17,7 @@
         <TitleBar
             x:Name="AppTitleBar"
             Title="VoiceSpreader"
-            Subtitle="多设备音频同步 · v1.2.0">
+            Subtitle="多设备音频同步 · v1.2.1">
             <TitleBar.IconSource>
                 <ImageIconSource ImageSource="Assets/AppIcon.ico" />
             </TitleBar.IconSource>

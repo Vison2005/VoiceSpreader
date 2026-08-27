@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using VoiceSpreader.App.Models;
@@ -6,11 +7,7 @@ namespace VoiceSpreader.App.Services;
 
 public interface IRemoteMicrophoneSink
 {
-    void SetRemoteMicrophoneConnected(bool connected, uint sampleRate = 48_000);
-
-    void AddRemoteMicrophoneClockSample(ulong frameIndex, ulong monotonicNanoseconds);
-
-    void AppendRemoteMicrophonePcm16(ulong firstFrameIndex, uint sampleRate, short[] samples);
+    void PushRemoteMicrophoneOutputPcm16(uint sampleRate, short[] samples);
 }
 
 public sealed class SystemAudioFrameEventArgs(
@@ -278,6 +275,19 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         }
     }
 
+    public void PushRemoteMicrophoneOutputPcm16(uint sampleRate, short[] samples)
+    {
+        ArgumentNullException.ThrowIfNull(samples);
+        if (IsAvailable && samples.Length > 0)
+        {
+            VS_PushRemoteMicrophoneOutputPcm16(
+                _handle,
+                sampleRate,
+                samples,
+                samples.Length);
+        }
+    }
+
     public bool StartRemoteMicrophoneOutput(
         AudioEndpoint device,
         int bufferMilliseconds = 20,
@@ -376,32 +386,36 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         }
     }
 
-    private void OnStatus(nint context, nint message) =>
-        StatusChanged?.Invoke(this, Marshal.PtrToStringUni(message) ?? string.Empty);
+    private void OnStatus(nint context, nint message) => InvokeNativeCallback(() =>
+        StatusChanged?.Invoke(this, Marshal.PtrToStringUni(message) ?? string.Empty));
 
-    private void OnError(nint context, nint message) =>
-        ErrorOccurred?.Invoke(this, Marshal.PtrToStringUni(message) ?? "未知音频错误");
+    private void OnError(nint context, nint message) => InvokeNativeCallback(() =>
+        ErrorOccurred?.Invoke(this, Marshal.PtrToStringUni(message) ?? "未知音频错误"));
 
-    private void OnRunning(nint context, int active) => RunningChanged?.Invoke(this, active != 0);
+    private void OnRunning(nint context, int active) => InvokeNativeCallback(() =>
+        RunningChanged?.Invoke(this, active != 0));
 
-    private void OnLevel(nint context, double levelDbfs, int probeAllowed) =>
-        ProgramLevelChanged?.Invoke(this, new ProgramLevelEventArgs(levelDbfs, probeAllowed != 0));
+    private void OnLevel(nint context, double levelDbfs, int probeAllowed) => InvokeNativeCallback(() =>
+        ProgramLevelChanged?.Invoke(this, new ProgramLevelEventArgs(levelDbfs, probeAllowed != 0)));
 
     private void OnCalibration(nint context, nint resultsJson)
     {
-        var json = Marshal.PtrToStringUni(resultsJson);
-        var response = string.IsNullOrWhiteSpace(json)
-            ? null
-            : JsonSerializer.Deserialize<CalibrationResponse>(json, SerializerOptions);
-        var outcome = response?.Outcome?.ToLowerInvariant() switch
+        InvokeNativeCallback(() =>
         {
-            "cancelled" => CalibrationOutcome.Cancelled,
-            "failed" => CalibrationOutcome.Failed,
-            _ => CalibrationOutcome.Completed,
-        };
-        CalibrationCompleted?.Invoke(
-            this,
-            new CalibrationCompletedEventArgs(response?.Results ?? [], outcome));
+            var json = Marshal.PtrToStringUni(resultsJson);
+            var response = string.IsNullOrWhiteSpace(json)
+                ? null
+                : JsonSerializer.Deserialize<CalibrationResponse>(json, SerializerOptions);
+            var outcome = response?.Outcome?.ToLowerInvariant() switch
+            {
+                "cancelled" => CalibrationOutcome.Cancelled,
+                "failed" => CalibrationOutcome.Failed,
+                _ => CalibrationOutcome.Completed,
+            };
+            CalibrationCompleted?.Invoke(
+                this,
+                new CalibrationCompletedEventArgs(response?.Results ?? [], outcome));
+        });
     }
 
     private void OnAcousticCorrection(
@@ -410,15 +424,15 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         int delayMilliseconds,
         double driftPpm,
         nint probeMode,
-        double confidence) =>
-        AcousticCorrectionChanged?.Invoke(
-            this,
-            new AcousticCorrectionEventArgs(
-                Marshal.PtrToStringUni(deviceId) ?? string.Empty,
-                delayMilliseconds,
-                driftPpm,
-                Marshal.PtrToStringUni(probeMode) ?? string.Empty,
-                confidence));
+        double confidence) => InvokeNativeCallback(() =>
+            AcousticCorrectionChanged?.Invoke(
+                this,
+                new AcousticCorrectionEventArgs(
+                    Marshal.PtrToStringUni(deviceId) ?? string.Empty,
+                    delayMilliseconds,
+                    driftPpm,
+                    Marshal.PtrToStringUni(probeMode) ?? string.Empty,
+                    confidence)));
 
     private void OnSystemAudioPcm(
         nint context,
@@ -428,20 +442,36 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         nint samples,
         int sampleCount)
     {
-        if (samples == nint.Zero || sampleCount <= 0)
+        if (samples == nint.Zero || sampleCount is <= 0 or > 1_000_000)
         {
             return;
         }
 
-        var managedSamples = new short[sampleCount];
-        Marshal.Copy(samples, managedSamples, 0, sampleCount);
-        SystemAudioFrameReady?.Invoke(
-            this,
-            new SystemAudioFrameEventArgs(
-                firstFrameIndex,
-                sampleRate,
-                channels,
-                managedSamples));
+        InvokeNativeCallback(() =>
+        {
+            var managedSamples = new short[sampleCount];
+            Marshal.Copy(samples, managedSamples, 0, sampleCount);
+            SystemAudioFrameReady?.Invoke(
+                this,
+                new SystemAudioFrameEventArgs(
+                    firstFrameIndex,
+                    sampleRate,
+                    channels,
+                    managedSamples));
+        });
+    }
+
+    private static void InvokeNativeCallback(Action callback)
+    {
+        try
+        {
+            callback();
+        }
+        catch (Exception exception)
+        {
+            // 任何托管异常都不能越过原生回调边界，否则运行时可能直接终止进程。
+            Trace.WriteLine($"VoiceSpreader 原生回调处理失败：{exception}");
+        }
     }
 
     public void Dispose()
@@ -556,6 +586,13 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
     private static extern void VS_AppendRemoteMicrophonePcm16(
         nint handle,
         ulong firstFrameIndex,
+        uint sampleRate,
+        [In] short[] samples,
+        int sampleCount);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_PushRemoteMicrophoneOutputPcm16(
+        nint handle,
         uint sampleRate,
         [In] short[] samples,
         int sampleCount);
