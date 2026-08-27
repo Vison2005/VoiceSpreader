@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 
 namespace VoiceSpreader.App.Services;
 
@@ -26,24 +27,44 @@ public sealed class PhonePairingService : IDisposable
         ["vmware", "virtual", "radmin", "zerotier", "vpn", "hyper-v", "vethernet", "wsl"];
 
     private readonly IRemoteMicrophoneSink _audioEngine;
+    private readonly ISystemAudioCaptureSource? _systemAudioSource;
     private readonly object _clientLock = new();
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly Channel<SystemAudioFrameEventArgs> _playbackFrames =
+        Channel.CreateBounded<SystemAudioFrameEventArgs>(new BoundedChannelOptions(12)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = true,
+        });
+    private readonly Task _playbackSendTask;
     private TcpListener? _listener;
     private UdpClient? _discovery;
     private TcpClient? _client;
-    private NetworkStream? _clientStream;
+    private volatile NetworkStream? _clientStream;
     private string _sessionId = string.Empty;
     private string _sessionSecret = string.Empty;
     private string _pairingCode = string.Empty;
     private string _phoneName = string.Empty;
-    private bool _authenticated;
+    private volatile bool _authenticated;
     private bool _microphoneStreaming;
+    private volatile bool _playbackRequested;
+    private volatile bool _playbackStreaming;
+    private volatile int _negotiatedProtocol = 1;
     private bool _disposed;
 
-    public PhonePairingService(IRemoteMicrophoneSink audioEngine)
+    public PhonePairingService(
+        IRemoteMicrophoneSink audioEngine,
+        ISystemAudioCaptureSource? systemAudioSource = null)
     {
         _audioEngine = audioEngine;
+        _systemAudioSource = systemAudioSource;
+        if (_systemAudioSource is not null)
+        {
+            _systemAudioSource.SystemAudioFrameReady += SystemAudioSource_FrameReady;
+        }
+        _playbackSendTask = PlaybackSendLoopAsync(_lifetime.Token);
         LocalAddresses = GetLocalIpv4Addresses();
         LocalAddress = LocalAddresses.Count > 0 ? LocalAddresses[0] : IPAddress.Loopback.ToString();
         GenerateCredentials();
@@ -56,6 +77,8 @@ public sealed class PhonePairingService : IDisposable
     public event EventHandler<bool>? MicrophoneStreamingChanged;
 
     public event EventHandler<double>? MicrophoneLevelChanged;
+
+    public event EventHandler<bool>? PlaybackStreamingChanged;
 
     public IReadOnlyList<string> LocalAddresses { get; private set; }
 
@@ -70,6 +93,10 @@ public sealed class PhonePairingService : IDisposable
     public bool IsPhoneConnected => _authenticated && _client?.Connected == true;
 
     public bool IsMicrophoneStreaming => _microphoneStreaming;
+
+    public bool IsPlaybackStreaming => _playbackStreaming;
+
+    public bool SupportsPlayback => _authenticated && _negotiatedProtocol >= 2;
 
     public string ConnectedPhoneName => _phoneName;
 
@@ -107,7 +134,7 @@ public sealed class PhonePairingService : IDisposable
             StatusChanged?.Invoke(this, $"手机配对码发现不可用：{exception.Message}；二维码仍可使用。");
         }
 
-        StatusChanged?.Invoke(this, $"手机麦克风配对服务已启动：{LocalAddress}:{ServerPort}");
+        StatusChanged?.Invoke(this, $"手机设备互联服务已启动：{LocalAddress}:{ServerPort}");
     }
 
     public bool SetLocalAddress(string address)
@@ -124,7 +151,8 @@ public sealed class PhonePairingService : IDisposable
 
     public async Task<bool> SetMicrophoneEnabledAsync(bool enabled)
     {
-        if (!_authenticated || _clientStream is null)
+        var stream = _clientStream;
+        if (!_authenticated || stream is null)
         {
             StatusChanged?.Invoke(this, "手机尚未连接，无法切换麦克风。");
             return false;
@@ -132,10 +160,19 @@ public sealed class PhonePairingService : IDisposable
 
         try
         {
-            await SendJsonLineAsync(
-                new { type = "setMicrophone", enabled },
-                _clientStream,
-                _lifetime.Token);
+            if (_negotiatedProtocol >= 2)
+            {
+                await SendBinaryFrameAsync(new byte[] { 10, enabled ? (byte)1 : (byte)0 },
+                                           stream,
+                                           _lifetime.Token);
+            }
+            else
+            {
+                await SendJsonLineAsync(
+                    new { type = "setMicrophone", enabled },
+                    stream,
+                    _lifetime.Token);
+            }
             StatusChanged?.Invoke(
                 this,
                 enabled ? "已请求手机启用麦克风。" : "已请求手机停止并释放麦克风。");
@@ -144,6 +181,41 @@ public sealed class PhonePairingService : IDisposable
         catch (Exception exception) when (exception is IOException or SocketException)
         {
             StatusChanged?.Invoke(this, $"向手机发送麦克风控制命令失败：{exception.Message}");
+            return false;
+        }
+    }
+
+    public async Task<bool> SetPlaybackEnabledAsync(bool enabled)
+    {
+        var stream = _clientStream;
+        if (!_authenticated || stream is null || _negotiatedProtocol < 2)
+        {
+            StatusChanged?.Invoke(
+                this,
+                _authenticated
+                    ? "当前手机端版本不支持接收 Windows 声音。"
+                    : "手机尚未连接，无法切换 Windows 声音播放。");
+            return false;
+        }
+
+        try
+        {
+            await SendBinaryFrameAsync(new byte[] { 11, enabled ? (byte)1 : (byte)0 },
+                                       stream,
+                                       _lifetime.Token);
+            _playbackRequested = enabled;
+            if (!enabled)
+            {
+                UpdatePlaybackStreaming(false);
+            }
+            StatusChanged?.Invoke(
+                this,
+                enabled ? "已请求手机准备播放 Windows 声音。" : "已请求手机停止播放 Windows 声音。");
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or SocketException)
+        {
+            StatusChanged?.Invoke(this, $"向手机发送播放控制命令失败：{exception.Message}");
             return false;
         }
     }
@@ -223,7 +295,7 @@ public sealed class PhonePairingService : IDisposable
         try
         {
             var handshake = await ReadLineAsync(stream, 4096, cancellationToken);
-            if (!TryAuthenticate(handshake, out var phoneName))
+            if (!TryAuthenticate(handshake, out var phoneName, out var protocol))
             {
                 await SendJsonLineAsync(
                     new { type = "error", message = "手机配对凭据不匹配" },
@@ -233,20 +305,23 @@ public sealed class PhonePairingService : IDisposable
             }
 
             _phoneName = phoneName;
+            _negotiatedProtocol = protocol;
             _authenticated = true;
             UpdateMicrophoneStreaming(false);
+            UpdatePlaybackStreaming(false);
             await SendJsonLineAsync(
                 new
                 {
                     type = "accepted",
-                    protocol = 1,
+                    protocol,
                     sampleRate = RemoteSampleRate,
                     microphoneEnabled = false,
+                    playbackEnabled = false,
                 },
                 stream,
                 cancellationToken);
             ConnectionChanged?.Invoke(this, new PhoneConnectionChangedEventArgs(true, phoneName));
-            StatusChanged?.Invoke(this, $"手机已连接：{phoneName}；麦克风保持关闭。");
+            StatusChanged?.Invoke(this, $"手机已连接：{phoneName}；音频链路保持关闭。");
 
             var lengthBytes = new byte[4];
             while (!cancellationToken.IsCancellationRequested)
@@ -275,7 +350,7 @@ public sealed class PhonePairingService : IDisposable
         }
         catch (Exception exception) when (exception is IOException or SocketException or InvalidDataException)
         {
-            StatusChanged?.Invoke(this, $"手机麦克风连接异常：{exception.Message}");
+            StatusChanged?.Invoke(this, $"手机设备互联连接异常：{exception.Message}");
         }
         finally
         {
@@ -300,17 +375,20 @@ public sealed class PhonePairingService : IDisposable
         }
     }
 
-    private bool TryAuthenticate(string handshake, out string phoneName)
+    private bool TryAuthenticate(string handshake, out string phoneName, out int negotiatedProtocol)
     {
         phoneName = string.Empty;
+        negotiatedProtocol = 1;
         try
         {
             using var document = JsonDocument.Parse(handshake);
             var root = document.RootElement;
+            var protocolValue = root.TryGetProperty("protocol", out var protocol)
+                ? protocol.GetInt32()
+                : 0;
             var valid = root.TryGetProperty("type", out var type)
                         && type.GetString() == "hello"
-                        && root.TryGetProperty("protocol", out var protocol)
-                        && protocol.GetInt32() == 1
+                        && protocolValue is 1 or 2
                         && root.TryGetProperty("session", out var session)
                         && string.Equals(session.GetString(), _sessionId, StringComparison.OrdinalIgnoreCase)
                         && root.TryGetProperty("secret", out var secret)
@@ -319,6 +397,8 @@ public sealed class PhonePairingService : IDisposable
             {
                 return false;
             }
+
+            negotiatedProtocol = protocolValue;
 
             phoneName = root.TryGetProperty("deviceName", out var name)
                 ? name.GetString() ?? string.Empty
@@ -353,6 +433,14 @@ public sealed class PhonePairingService : IDisposable
                 _audioEngine.AddRemoteMicrophoneClockSample(
                     BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(1, 8)),
                     BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(9, 8)));
+                break;
+            case 5 when body.Length >= 2:
+                UpdatePlaybackStreaming(body[1] != 0);
+                break;
+            case 6:
+                StatusChanged?.Invoke(this, $"手机播放：{Encoding.UTF8.GetString(body, 1, body.Length - 1)}");
+                _playbackRequested = false;
+                UpdatePlaybackStreaming(false);
                 break;
         }
     }
@@ -407,6 +495,75 @@ public sealed class PhonePairingService : IDisposable
         StatusChanged?.Invoke(
             this,
             enabled ? "手机麦克风已启用并开始回传。" : "手机麦克风已停止并释放。");
+    }
+
+    private void UpdatePlaybackStreaming(bool enabled)
+    {
+        if (_playbackStreaming == enabled)
+        {
+            return;
+        }
+
+        _playbackStreaming = enabled;
+        PlaybackStreamingChanged?.Invoke(this, enabled);
+        StatusChanged?.Invoke(
+            this,
+            enabled ? "手机已准备播放 Windows 声音。" : "手机已停止播放 Windows 声音。");
+    }
+
+    private void SystemAudioSource_FrameReady(object? sender, SystemAudioFrameEventArgs args)
+    {
+        if (_playbackRequested && _authenticated && _negotiatedProtocol >= 2)
+        {
+            _playbackFrames.Writer.TryWrite(args);
+        }
+    }
+
+    private async Task PlaybackSendLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var frame in _playbackFrames.Reader.ReadAllAsync(cancellationToken))
+            {
+                var stream = _clientStream;
+                if (!_playbackRequested || !_authenticated || stream is null || _negotiatedProtocol < 2)
+                {
+                    continue;
+                }
+                if (frame.Samples.Length > (MaximumFrameBytes - 14) / sizeof(short))
+                {
+                    StatusChanged?.Invoke(this, "Windows 音频包过大，已丢弃该包。");
+                    continue;
+                }
+
+                var body = new byte[14 + frame.Samples.Length * sizeof(short)];
+                body[0] = 12;
+                BinaryPrimitives.WriteUInt64BigEndian(body.AsSpan(1, 8), frame.FirstFrameIndex);
+                BinaryPrimitives.WriteUInt32BigEndian(body.AsSpan(9, 4), frame.SampleRate);
+                body[13] = checked((byte)frame.Channels);
+                for (var index = 0; index < frame.Samples.Length; index++)
+                {
+                    BinaryPrimitives.WriteInt16LittleEndian(
+                        body.AsSpan(14 + index * sizeof(short), sizeof(short)),
+                        frame.Samples[index]);
+                }
+
+                try
+                {
+                    await SendBinaryFrameAsync(body, stream, cancellationToken);
+                }
+                catch (Exception exception) when (exception is IOException or SocketException)
+                {
+                    StatusChanged?.Invoke(this, $"Windows 声音发送失败：{exception.Message}");
+                    _playbackRequested = false;
+                    UpdatePlaybackStreaming(false);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 应用退出时停止发送循环属于正常生命周期。
+        }
     }
 
     private async Task DiscoveryLoopAsync(CancellationToken cancellationToken)
@@ -474,6 +631,30 @@ public sealed class PhonePairingService : IDisposable
         }
     }
 
+    private async Task SendBinaryFrameAsync(
+        ReadOnlyMemory<byte> body,
+        NetworkStream stream,
+        CancellationToken cancellationToken)
+    {
+        if (body.Length is < 1 or > MaximumFrameBytes)
+        {
+            throw new InvalidDataException("发送给手机的数据帧长度无效。");
+        }
+
+        var length = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(length, checked((uint)body.Length));
+        await _sendGate.WaitAsync(cancellationToken);
+        try
+        {
+            await stream.WriteAsync(length, cancellationToken);
+            await stream.WriteAsync(body, cancellationToken);
+        }
+        finally
+        {
+            _sendGate.Release();
+        }
+    }
+
     private static async Task<string> ReadLineAsync(
         NetworkStream stream,
         int maximumBytes,
@@ -519,7 +700,10 @@ public sealed class PhonePairingService : IDisposable
     {
         _authenticated = false;
         _phoneName = string.Empty;
+        _negotiatedProtocol = 1;
+        _playbackRequested = false;
         UpdateMicrophoneStreaming(false);
+        UpdatePlaybackStreaming(false);
     }
 
     private void GenerateCredentials()
@@ -592,11 +776,23 @@ public sealed class PhonePairingService : IDisposable
 
         _disposed = true;
         _lifetime.Cancel();
+        if (_systemAudioSource is not null)
+        {
+            _systemAudioSource.SystemAudioFrameReady -= SystemAudioSource_FrameReady;
+        }
         DisconnectPhone();
         _listener?.Stop();
         _listener = null;
         _discovery?.Dispose();
         _discovery = null;
+        try
+        {
+            _playbackSendTask.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            // 关闭过程中取消发送循环属于正常生命周期。
+        }
         _sendGate.Dispose();
         _lifetime.Dispose();
     }

@@ -25,6 +25,7 @@ public sealed partial class MainPage : Page
         ViewModel = new MainViewModel(((App)Application.Current).Host, DispatcherQueue);
         InitializeComponent();
         ThemeSelector.SelectedItem = ThemeSelector.Items[(int)ViewModel.ThemeMode];
+        WorkspaceSelector.SelectedItem = WorkspaceSelector.Items[0];
     }
 
     public MainViewModel ViewModel { get; }
@@ -38,6 +39,7 @@ public sealed partial class MainPage : Page
 
         _loaded = true;
         await ViewModel.RefreshDevicesAsync();
+        await UpdatePhoneQrCodeAsync();
     }
 
     private void Page_Unloaded(object sender, RoutedEventArgs args) => ViewModel.Dispose();
@@ -48,10 +50,16 @@ public sealed partial class MainPage : Page
         _wideLayout = wide;
         PrimaryColumn.Width = new GridLength(1, GridUnitType.Star);
         SecondaryColumn.Width = wide ? new GridLength(340) : new GridLength(0);
+        DeviceLinkPrimaryColumn.Width = new GridLength(1, GridUnitType.Star);
+        DeviceLinkSecondaryColumn.Width = wide ? new GridLength(340) : new GridLength(0);
         Grid.SetColumn(StatusColumn, wide ? 1 : 0);
         Grid.SetRow(StatusColumn, wide ? 0 : 1);
+        Grid.SetColumn(DeviceLinkStatusColumn, wide ? 1 : 0);
+        Grid.SetRow(DeviceLinkStatusColumn, wide ? 0 : 1);
         WorkspaceGrid.ColumnSpacing = wide ? 16 : 0;
         WorkspaceGrid.RowSpacing = wide ? 0 : 16;
+        DeviceLinkWorkspace.ColumnSpacing = wide ? 16 : 0;
+        DeviceLinkWorkspace.RowSpacing = wide ? 0 : 16;
         QueueAdaptiveWorkspaceLayout();
     }
 
@@ -75,6 +83,10 @@ public sealed partial class MainPage : Page
 
     private void UpdateAdaptiveWorkspaceLayout()
     {
+        if (WorkspaceGrid.Visibility != Visibility.Visible)
+        {
+            return;
+        }
         if (!_wideLayout)
         {
             SetOutputListMaximumHeight(DefaultOutputListMaximumHeight);
@@ -205,7 +217,59 @@ public sealed partial class MainPage : Page
     {
         if (!string.IsNullOrWhiteSpace(ViewModel.PhonePairingPayload))
         {
-            PhoneQrImage.Source = await QrCodeService.CreateImageAsync(ViewModel.PhonePairingPayload);
+            var source = await QrCodeService.CreateImageAsync(ViewModel.PhonePairingPayload);
+            PhoneQrImage.Source = source;
+            DeviceLinkQrImage.Source = source;
+        }
+    }
+
+    private async void PhoneMicrophoneRouteButton_Click(object sender, RoutedEventArgs args)
+    {
+        var error = await ViewModel.TogglePhoneMicrophoneRouteAsync();
+        if (error is not null)
+        {
+            await ShowValidationAsync("无法建立手机麦克风路由", error);
+        }
+    }
+
+    private async void PhonePlaybackButton_Click(object sender, RoutedEventArgs args)
+    {
+        var error = await ViewModel.TogglePhonePlaybackAsync();
+        if (error is not null)
+        {
+            await ShowValidationAsync("无法播放 Windows 声音", error);
+        }
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "WinUI XAML 事件处理器必须是页面实例方法。")]
+    private async void OpenVirtualCableWebsiteButton_Click(object sender, RoutedEventArgs args) =>
+        await Launcher.LaunchUriAsync(new Uri("https://vb-audio.com/Cable/"));
+
+    private async void WorkspaceSelector_SelectionChanged(
+        SelectorBar sender,
+        SelectorBarSelectionChangedEventArgs args)
+    {
+        var deviceLinkSelected = sender.Items.IndexOf(sender.SelectedItem) == 1;
+        WorkspaceGrid.Visibility = deviceLinkSelected ? Visibility.Collapsed : Visibility.Visible;
+        DeviceLinkWorkspace.Visibility = deviceLinkSelected ? Visibility.Visible : Visibility.Collapsed;
+        SyncFooterStatus.Visibility = deviceLinkSelected ? Visibility.Collapsed : Visibility.Visible;
+        DeviceLinkFooterStatus.Visibility = deviceLinkSelected ? Visibility.Visible : Visibility.Collapsed;
+        CalibrationActionButton.Visibility = deviceLinkSelected ? Visibility.Collapsed : Visibility.Visible;
+        StartActionButton.Visibility = deviceLinkSelected ? Visibility.Collapsed : Visibility.Visible;
+        WorkspaceTitle.Text = deviceLinkSelected ? "设备互联" : "同步控制台";
+        WorkspaceSubtitle.Text = deviceLinkSelected
+            ? "在 Windows 与 Android 之间建立独立音频链路"
+            : "将系统声音同步到多个 Windows 音频设备";
+        if (deviceLinkSelected)
+        {
+            await UpdatePhoneQrCodeAsync();
+        }
+        else
+        {
+            QueueAdaptiveWorkspaceLayout();
         }
     }
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(VoiceSpreader VERSION 1.1.0 LANGUAGES CXX)
+project(VoiceSpreader VERSION 1.2.0 LANGUAGES CXX)
 
 include(CTest)
 
@@ -37,6 +37,10 @@ set(VOICESPREADER_SOURCES
     src/acoustic_drift_tracker.h
     src/remote_microphone_buffer.cpp
     src/remote_microphone_buffer.h
+    src/remote_microphone_output.cpp
+    src/remote_microphone_output.h
+    src/system_audio_capture.cpp
+    src/system_audio_capture.h
     src/phone_pairing_server.cpp
     src/phone_pairing_server.h
     src/bluetooth_audio_receiver.cpp
@@ -103,6 +107,10 @@ set(VOICESPREADER_NATIVE_SOURCES
     src/acoustic_drift_tracker.h
     src/remote_microphone_buffer.cpp
     src/remote_microphone_buffer.h
+    src/remote_microphone_output.cpp
+    src/remote_microphone_output.h
+    src/system_audio_capture.cpp
+    src/system_audio_capture.h
     src/output_worker.cpp
     src/output_worker.h
     src/audio_engine.cpp

@@ -8,7 +8,7 @@
   <Identity
     Name="Vison2005.VoiceSpreader"
     Publisher="CN=Vison2005"
-    Version="1.1.0.0"
+    Version="1.2.0.0"
     ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>VoiceSpreader</DisplayName>

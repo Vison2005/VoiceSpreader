@@ -3,6 +3,8 @@
 #include "audio_engine.h"
 #include "latency_calibrator.h"
 #include "remote_microphone_buffer.h"
+#include "remote_microphone_output.h"
+#include "system_audio_capture.h"
 #include "wasapi_device_manager.h"
 
 #include <QJsonArray>
@@ -110,6 +112,14 @@ struct BridgeHandle
         , acousticCorrectionCallback(acousticCorrection)
         , context(callbackContext)
     {
+        remoteMicrophoneOutput = std::make_unique<RemoteMicrophoneOutput>(
+            [this](const QString& message) {
+                invokeText(statusCallback, context, message);
+            });
+        systemAudioCapture = std::make_unique<SystemAudioCapture>(
+            [this](const QString& message) {
+                invokeText(statusCallback, context, message);
+            });
         QObject::connect(&engine,
                          &AudioEngine::statusChanged,
                          &engine,
@@ -215,6 +225,8 @@ struct BridgeHandle
     LatencyCalibrator calibrator;
     std::shared_ptr<RemoteMicrophoneBuffer> remoteMicrophone =
         std::make_shared<RemoteMicrophoneBuffer>();
+    std::unique_ptr<RemoteMicrophoneOutput> remoteMicrophoneOutput;
+    std::unique_ptr<SystemAudioCapture> systemAudioCapture;
     VsTextCallback statusCallback = nullptr;
     VsTextCallback errorCallback = nullptr;
     VsStateCallback runningCallback = nullptr;
@@ -441,4 +453,109 @@ void __cdecl VS_AppendRemoteMicrophonePcm16(
     value->remoteMicrophone->append(firstFrameIndex,
                                     sampleRate,
                                     normalized);
+    if (value->remoteMicrophoneOutput != nullptr) {
+        value->remoteMicrophoneOutput->push(sampleRate, normalized);
+    }
+}
+
+int __cdecl VS_StartRemoteMicrophoneOutput(void* handle,
+                                           const wchar_t* deviceId,
+                                           const wchar_t* deviceName,
+                                           std::uint32_t sampleRate,
+                                           int bufferMilliseconds,
+                                           int volumePercent)
+{
+    BridgeHandle* value = bridge(handle);
+    if (value == nullptr || value->remoteMicrophoneOutput == nullptr) {
+        return 0;
+    }
+    const AudioDevice device{fromWide(deviceId), fromWide(deviceName), false};
+    return value->remoteMicrophoneOutput->start(device,
+                                                sampleRate,
+                                                bufferMilliseconds,
+                                                volumePercent)
+               ? 1
+               : 0;
+}
+
+void __cdecl VS_StopRemoteMicrophoneOutput(void* handle)
+{
+    if (BridgeHandle* value = bridge(handle);
+        value != nullptr && value->remoteMicrophoneOutput != nullptr) {
+        value->remoteMicrophoneOutput->stop();
+    }
+}
+
+int __cdecl VS_IsRemoteMicrophoneOutputActive(void* handle)
+{
+    BridgeHandle* value = bridge(handle);
+    return value != nullptr && value->remoteMicrophoneOutput != nullptr
+                   && value->remoteMicrophoneOutput->isActive()
+               ? 1
+               : 0;
+}
+
+void __cdecl VS_SetRemoteMicrophoneOutputVolume(void* handle, int volumePercent)
+{
+    if (BridgeHandle* value = bridge(handle);
+        value != nullptr && value->remoteMicrophoneOutput != nullptr) {
+        value->remoteMicrophoneOutput->setVolumePercent(volumePercent);
+    }
+}
+
+int __cdecl VS_StartSystemAudioCapture(
+    void* handle,
+    const wchar_t* deviceId,
+    const wchar_t* deviceName,
+    int volumePercent,
+    VsSystemAudioPcmCallback pcmCallback,
+    void* callbackContext)
+{
+    BridgeHandle* value = bridge(handle);
+    if (value == nullptr || value->systemAudioCapture == nullptr || pcmCallback == nullptr) {
+        return 0;
+    }
+    const AudioDevice device{fromWide(deviceId), fromWide(deviceName), false};
+    return value->systemAudioCapture->start(
+               device,
+               volumePercent,
+               [pcmCallback, callbackContext](std::uint64_t firstFrameIndex,
+                                              std::uint32_t sampleRate,
+                                              std::uint16_t channels,
+                                              const std::int16_t* samples,
+                                              std::size_t sampleCount) {
+                   pcmCallback(callbackContext,
+                               firstFrameIndex,
+                               sampleRate,
+                               channels,
+                               samples,
+                               static_cast<int>(sampleCount));
+               })
+               ? 1
+               : 0;
+}
+
+void __cdecl VS_StopSystemAudioCapture(void* handle)
+{
+    if (BridgeHandle* value = bridge(handle);
+        value != nullptr && value->systemAudioCapture != nullptr) {
+        value->systemAudioCapture->stop();
+    }
+}
+
+int __cdecl VS_IsSystemAudioCaptureActive(void* handle)
+{
+    BridgeHandle* value = bridge(handle);
+    return value != nullptr && value->systemAudioCapture != nullptr
+                   && value->systemAudioCapture->isActive()
+               ? 1
+               : 0;
+}
+
+void __cdecl VS_SetSystemAudioCaptureVolume(void* handle, int volumePercent)
+{
+    if (BridgeHandle* value = bridge(handle);
+        value != nullptr && value->systemAudioCapture != nullptr) {
+        value->systemAudioCapture->setVolumePercent(volumePercent);
+    }
 }

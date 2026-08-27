@@ -27,5 +27,13 @@ public sealed record AppSettings
 
     public string? PhonePairingAddress { get; init; }
 
+    public string? PhoneMicrophoneOutputDeviceId { get; init; }
+
+    public int PhoneMicrophoneOutputVolume { get; init; } = 100;
+
+    public string? PhonePlaybackSourceDeviceId { get; init; }
+
+    public int PhonePlaybackVolume { get; init; } = 100;
+
     public Dictionary<string, OutputSettings> Outputs { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }

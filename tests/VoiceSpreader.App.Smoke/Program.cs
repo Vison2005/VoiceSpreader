@@ -14,7 +14,8 @@ Require(adjustableOutput.DelayMilliseconds == -25, "输出相对补偿不接受�
 Require(adjustableOutput.DelayDisplay == "-25 ms", "输出相对补偿显示格式无效");
 
 var sink = new RecordingRemoteMicrophoneSink();
-using var service = new PhonePairingService(sink);
+var systemAudio = new RecordingSystemAudioSource();
+using var service = new PhonePairingService(sink, systemAudio);
 var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 service.ConnectionChanged += (_, args) =>
 {
@@ -72,6 +73,56 @@ await WaitForAsync(() => !sink.Connected, "手机麦克风停用状态未写入�
 service.DisconnectPhone();
 await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
+using var protocol2Client = new TcpClient();
+await protocol2Client.ConnectAsync(IPAddress.Loopback, service.ServerPort);
+var protocol2Stream = protocol2Client.GetStream();
+var protocol2Hello = JsonSerializer.SerializeToUtf8Bytes(new
+{
+    type = "hello",
+    protocol = 2,
+    session = payloadParts[3],
+    secret = payloadParts[4],
+    deviceName = "WinUI protocol 2 phone",
+});
+await protocol2Stream.WriteAsync(protocol2Hello);
+await protocol2Stream.WriteAsync("\n"u8.ToArray());
+var protocol2Accepted = await ReadLineAsync(protocol2Stream);
+Require(protocol2Accepted.Contains("\"protocol\":2", StringComparison.Ordinal),
+    "TCP v2 握手未协商二进制下行协议");
+
+Require(await service.SetMicrophoneEnabledAsync(true), "桌面端无法发送 v2 麦克风启用命令");
+var protocol2MicrophoneCommand = await ReadBinaryFrameAsync(protocol2Stream);
+Require(protocol2MicrophoneCommand.SequenceEqual(new byte[] { 10, 1 }),
+    "v2 麦克风启用命令格式无效");
+await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
+await WaitForAsync(() => sink.Connected, "v2 手机麦克风启用状态未写入原生缓冲");
+
+Require(await service.SetPlaybackEnabledAsync(true), "桌面端无法发送手机播放启用命令");
+var playbackCommand = await ReadBinaryFrameAsync(protocol2Stream);
+Require(playbackCommand.SequenceEqual(new byte[] { 11, 1 }), "手机播放启用命令格式无效");
+
+var playbackPcm = new short[] { 1000, -1000, 2000, -2000 };
+systemAudio.Emit(new SystemAudioFrameEventArgs(480, 48_000, 2, playbackPcm));
+var playbackFrame = await ReadBinaryFrameAsync(protocol2Stream);
+Require(playbackFrame[0] == 12, "Windows 音频帧类型无效");
+Require(BinaryPrimitives.ReadUInt64BigEndian(playbackFrame.AsSpan(1, 8)) == 480,
+    "Windows 音频帧序号无效");
+Require(BinaryPrimitives.ReadUInt32BigEndian(playbackFrame.AsSpan(9, 4)) == 48_000,
+    "Windows 音频采样率无效");
+Require(playbackFrame[13] == 2, "Windows 音频声道数无效");
+Require(BinaryPrimitives.ReadInt16LittleEndian(playbackFrame.AsSpan(14, 2)) == 1000,
+    "Windows PCM 数据无效");
+
+await protocol2Stream.WriteAsync(CreatePlaybackStateFrame(enabled: true));
+await WaitForAsync(() => service.IsPlaybackStreaming, "手机播放就绪状态未写入桌面端");
+Require(await service.SetPlaybackEnabledAsync(false), "桌面端无法发送手机播放停用命令");
+var stopPlaybackCommand = await ReadBinaryFrameAsync(protocol2Stream);
+Require(stopPlaybackCommand.SequenceEqual(new byte[] { 11, 0 }), "手机播放停用命令格式无效");
+Require(await service.SetMicrophoneEnabledAsync(false), "桌面端无法发送 v2 麦克风停用命令");
+var stopProtocol2MicrophoneCommand = await ReadBinaryFrameAsync(protocol2Stream);
+Require(stopProtocol2MicrophoneCommand.SequenceEqual(new byte[] { 10, 0 }),
+    "v2 麦克风停用命令格式无效");
+
 Console.WriteLine("WinUI phone pairing protocol smoke test passed");
 
 static byte[] CreateMicrophoneStateFrame(bool enabled)
@@ -98,6 +149,15 @@ static byte[] CreatePcmFrame(ulong firstFrame, uint sampleRate, short[] samples)
     return frame;
 }
 
+static byte[] CreatePlaybackStateFrame(bool enabled)
+{
+    var frame = new byte[6];
+    BinaryPrimitives.WriteUInt32BigEndian(frame, 2);
+    frame[4] = 5;
+    frame[5] = enabled ? (byte)1 : (byte)0;
+    return frame;
+}
+
 static byte[] CreateClockFrame(ulong frameIndex, ulong monotonicNanoseconds)
 {
     var frame = new byte[21];
@@ -121,6 +181,20 @@ static async Task<string> ReadLineAsync(NetworkStream stream)
         buffer.WriteByte(value[0]);
     }
     throw new InvalidDataException("连接在读取 JSON 行时关闭");
+}
+
+static async Task<byte[]> ReadBinaryFrameAsync(NetworkStream stream)
+{
+    var lengthBytes = new byte[4];
+    await stream.ReadExactlyAsync(lengthBytes);
+    var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(lengthBytes));
+    if (length is < 1 or > 256 * 1024)
+    {
+        throw new InvalidDataException("二进制下行帧长度无效");
+    }
+    var body = new byte[length];
+    await stream.ReadExactlyAsync(body);
+    return body;
 }
 
 static async Task WaitForAsync(Func<bool> predicate, string message)
@@ -190,4 +264,24 @@ file sealed class RecordingRemoteMicrophoneSink : IRemoteMicrophoneSink
             _samples = [.. samples];
         }
     }
+}
+
+file sealed class RecordingSystemAudioSource : ISystemAudioCaptureSource
+{
+    public event EventHandler<SystemAudioFrameEventArgs>? SystemAudioFrameReady;
+
+    public bool StartSystemAudioCapture(AudioEndpoint device, int volumePercent = 100) => true;
+
+    public void StopSystemAudioCapture()
+    {
+    }
+
+    public bool IsSystemAudioCaptureActive => false;
+
+    public void SetSystemAudioCaptureVolume(int volumePercent)
+    {
+    }
+
+    public void Emit(SystemAudioFrameEventArgs frame) =>
+        SystemAudioFrameReady?.Invoke(this, frame);
 }

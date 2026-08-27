@@ -11,7 +11,7 @@ public sealed class AppHost : IDisposable
         SettingsStore = new SettingsStore();
         AudioEngine = new NativeAudioEngineBridge();
         BluetoothAudioReceiver = new BluetoothAudioReceiverService();
-        PhonePairing = new PhonePairingService(AudioEngine);
+        PhonePairing = new PhonePairingService(AudioEngine, AudioEngine);
     }
 
     public SettingsStore SettingsStore { get; }

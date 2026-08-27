@@ -18,6 +18,12 @@ using VsAcousticCorrectionCallback = void(__cdecl*)(void* context,
                                                     double driftPpm,
                                                     const wchar_t* probeMode,
                                                     double confidence);
+using VsSystemAudioPcmCallback = void(__cdecl*)(void* context,
+                                               std::uint64_t firstFrameIndex,
+                                               std::uint32_t sampleRate,
+                                               std::uint16_t channels,
+                                               const std::int16_t* samples,
+                                               int sampleCount);
 
 VS_NATIVE_API void* __cdecl VS_Create(VsTextCallback statusCallback,
                                       VsTextCallback errorCallback,
@@ -61,3 +67,26 @@ VS_NATIVE_API void __cdecl VS_AppendRemoteMicrophonePcm16(
     std::uint32_t sampleRate,
     const std::int16_t* samples,
     int sampleCount);
+VS_NATIVE_API int __cdecl VS_StartRemoteMicrophoneOutput(
+    void* handle,
+    const wchar_t* deviceId,
+    const wchar_t* deviceName,
+    std::uint32_t sampleRate,
+    int bufferMilliseconds,
+    int volumePercent);
+VS_NATIVE_API void __cdecl VS_StopRemoteMicrophoneOutput(void* handle);
+VS_NATIVE_API int __cdecl VS_IsRemoteMicrophoneOutputActive(void* handle);
+VS_NATIVE_API void __cdecl VS_SetRemoteMicrophoneOutputVolume(void* handle,
+                                                              int volumePercent);
+
+VS_NATIVE_API int __cdecl VS_StartSystemAudioCapture(
+    void* handle,
+    const wchar_t* deviceId,
+    const wchar_t* deviceName,
+    int volumePercent,
+    VsSystemAudioPcmCallback pcmCallback,
+    void* callbackContext);
+VS_NATIVE_API void __cdecl VS_StopSystemAudioCapture(void* handle);
+VS_NATIVE_API int __cdecl VS_IsSystemAudioCaptureActive(void* handle);
+VS_NATIVE_API void __cdecl VS_SetSystemAudioCaptureVolume(void* handle,
+                                                          int volumePercent);

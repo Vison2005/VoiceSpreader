@@ -8,10 +8,11 @@ VoiceSpreader 是 VoiceSharer 的 C++/Qt 重构项目。当前阶段先实现不
 
 - `v1.0.0`：Qt Widgets 稳定版本，代码位于 `main` 分支并已建立同名 Git 标签。
 - `v1.1.0`（已发布）：使用 C#、WinUI 3 和 Windows App SDK 重做桌面界面，代码位于 `feature/winui-v1.1.0` 分支。该版本使用 Mica、Windows 原生控件、系统主题与系统强调色，并针对宽屏和紧凑窗口提供自适应布局。
+- `v1.2.0`（当前版本）：新增独立的设备互联工作区。Android 麦克风可以通过 Wi-Fi 输出到 VB-CABLE，Windows 声音也可以通过独立链路发送到 Android 应用内播放。
 
 WinUI 版本通过 `VoiceSpreader.Native.dll` 复用现有 C++ 音频引擎。目前已接通真实 WASAPI 设备枚举、配置持久化、多输出启停、运行时音量/延迟/同步余量调节、节目电平、声学校准、Android 手机配对与远程麦克风、蓝牙 A2DP 接收、系统托盘和开机自启动。界面支持跟随系统、浅色和深色三种主题模式。Qt Widgets 不再参与新界面，但原生桥接层暂时仍依赖 QtCore 中的基础类型；后续会逐步移除这项运行时依赖。
 
-`v1.1.0` 已作为 WinUI 桌面版本发布；当前仍缺少安装包、完整本地化和设备热插拔自动恢复，这些作为后续版本的已知限制。Windows 原生多设备同步接口的评估和当前算法选择记录在 `docs/WINDOWS_AUDIO_SYNC.md`。
+`v1.2.0` 当前支持一台 Android 设备连接；多移动设备会话、混音和远端扬声器同步将在后续版本实现。完整本地化和设备热插拔自动恢复仍是已知限制。Windows 原生多设备同步接口的评估和当前算法选择记录在 `docs/WINDOWS_AUDIO_SYNC.md`。
 
 ## 当前可用功能
 
@@ -90,7 +91,7 @@ WinUI 版本通过 `VoiceSpreader.Native.dll` 复用现有 C++ 音频引擎。�
 
 ## 本机构建
 
-### WinUI 3（v1.1.0）
+### WinUI 3（v1.2.0）
 
 除下方 C++ 工具链外，还需要 .NET 9 SDK。执行以下命令会先构建原生桥接库，再构建并启动 WinUI 应用：
 

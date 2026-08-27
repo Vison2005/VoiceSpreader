@@ -13,6 +13,34 @@ public interface IRemoteMicrophoneSink
     void AppendRemoteMicrophonePcm16(ulong firstFrameIndex, uint sampleRate, short[] samples);
 }
 
+public sealed class SystemAudioFrameEventArgs(
+    ulong firstFrameIndex,
+    uint sampleRate,
+    ushort channels,
+    short[] samples) : EventArgs
+{
+    public ulong FirstFrameIndex { get; } = firstFrameIndex;
+
+    public uint SampleRate { get; } = sampleRate;
+
+    public ushort Channels { get; } = channels;
+
+    public short[] Samples { get; } = samples;
+}
+
+public interface ISystemAudioCaptureSource
+{
+    event EventHandler<SystemAudioFrameEventArgs>? SystemAudioFrameReady;
+
+    bool StartSystemAudioCapture(AudioEndpoint device, int volumePercent = 100);
+
+    void StopSystemAudioCapture();
+
+    bool IsSystemAudioCaptureActive { get; }
+
+    void SetSystemAudioCaptureVolume(int volumePercent);
+}
+
 public sealed record DeviceEnumerationResult(IReadOnlyList<AudioEndpoint> Devices, string? Error);
 
 public sealed record OutputEngineSettings(AudioEndpoint Device, int VolumePercent, int DelayMilliseconds);
@@ -77,7 +105,7 @@ public sealed class AcousticCorrectionEventArgs(
     public double Confidence { get; } = confidence;
 }
 
-public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
+public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink, ISystemAudioCaptureSource
 {
     private const string NativeLibrary = "VoiceSpreader.Native";
     private static readonly JsonSerializerOptions SerializerOptions = new()
@@ -92,6 +120,7 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
     private readonly LevelCallback _levelCallback;
     private readonly CalibrationCallback _calibrationCallback;
     private readonly AcousticCorrectionCallback _acousticCorrectionCallback;
+    private readonly SystemAudioPcmCallback _systemAudioPcmCallback;
     private nint _handle;
     private bool _disposed;
 
@@ -103,6 +132,7 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         _levelCallback = OnLevel;
         _calibrationCallback = OnCalibration;
         _acousticCorrectionCallback = OnAcousticCorrection;
+        _systemAudioPcmCallback = OnSystemAudioPcm;
 
         try
         {
@@ -137,6 +167,8 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
     public event EventHandler<CalibrationCompletedEventArgs>? CalibrationCompleted;
 
     public event EventHandler<AcousticCorrectionEventArgs>? AcousticCorrectionChanged;
+
+    public event EventHandler<SystemAudioFrameEventArgs>? SystemAudioFrameReady;
 
     public bool IsAvailable { get; }
 
@@ -246,6 +278,74 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         }
     }
 
+    public bool StartRemoteMicrophoneOutput(
+        AudioEndpoint device,
+        int bufferMilliseconds = 20,
+        int volumePercent = 100,
+        uint sampleRate = 48_000)
+    {
+        EnsureAvailable();
+        return VS_StartRemoteMicrophoneOutput(
+                   _handle,
+                   device.Id,
+                   device.Name,
+                   sampleRate,
+                   bufferMilliseconds,
+                   volumePercent)
+               != 0;
+    }
+
+    public void StopRemoteMicrophoneOutput()
+    {
+        if (IsAvailable)
+        {
+            VS_StopRemoteMicrophoneOutput(_handle);
+        }
+    }
+
+    public bool IsRemoteMicrophoneOutputActive =>
+        IsAvailable && VS_IsRemoteMicrophoneOutputActive(_handle) != 0;
+
+    public void SetRemoteMicrophoneOutputVolume(int volumePercent)
+    {
+        if (IsAvailable)
+        {
+            VS_SetRemoteMicrophoneOutputVolume(_handle, volumePercent);
+        }
+    }
+
+    public bool StartSystemAudioCapture(AudioEndpoint device, int volumePercent = 100)
+    {
+        EnsureAvailable();
+        return VS_StartSystemAudioCapture(
+                   _handle,
+                   device.Id,
+                   device.Name,
+                   volumePercent,
+                   _systemAudioPcmCallback,
+                   nint.Zero)
+               != 0;
+    }
+
+    public void StopSystemAudioCapture()
+    {
+        if (IsAvailable)
+        {
+            VS_StopSystemAudioCapture(_handle);
+        }
+    }
+
+    public bool IsSystemAudioCaptureActive =>
+        IsAvailable && VS_IsSystemAudioCaptureActive(_handle) != 0;
+
+    public void SetSystemAudioCaptureVolume(int volumePercent)
+    {
+        if (IsAvailable)
+        {
+            VS_SetSystemAudioCaptureVolume(_handle, volumePercent);
+        }
+    }
+
     private static unsafe DeviceEnumerationResult Enumerate(JsonBufferCallback callback)
     {
         var required = callback(nint.Zero, 0);
@@ -320,6 +420,30 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
                 Marshal.PtrToStringUni(probeMode) ?? string.Empty,
                 confidence));
 
+    private void OnSystemAudioPcm(
+        nint context,
+        ulong firstFrameIndex,
+        uint sampleRate,
+        ushort channels,
+        nint samples,
+        int sampleCount)
+    {
+        if (samples == nint.Zero || sampleCount <= 0)
+        {
+            return;
+        }
+
+        var managedSamples = new short[sampleCount];
+        Marshal.Copy(samples, managedSamples, 0, sampleCount);
+        SystemAudioFrameReady?.Invoke(
+            this,
+            new SystemAudioFrameEventArgs(
+                firstFrameIndex,
+                sampleRate,
+                channels,
+                managedSamples));
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -361,6 +485,15 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         double driftPpm,
         nint probeMode,
         double confidence);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void SystemAudioPcmCallback(
+        nint context,
+        ulong firstFrameIndex,
+        uint sampleRate,
+        ushort channels,
+        nint samples,
+        int sampleCount);
 
     private delegate int JsonBufferCallback(nint buffer, int capacity);
 
@@ -426,4 +559,40 @@ public sealed class NativeAudioEngineBridge : IDisposable, IRemoteMicrophoneSink
         uint sampleRate,
         [In] short[] samples,
         int sampleCount);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    private static extern int VS_StartRemoteMicrophoneOutput(
+        nint handle,
+        string deviceId,
+        string deviceName,
+        uint sampleRate,
+        int bufferMilliseconds,
+        int volumePercent);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_StopRemoteMicrophoneOutput(nint handle);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int VS_IsRemoteMicrophoneOutputActive(nint handle);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_SetRemoteMicrophoneOutputVolume(nint handle, int volumePercent);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    private static extern int VS_StartSystemAudioCapture(
+        nint handle,
+        string deviceId,
+        string deviceName,
+        int volumePercent,
+        SystemAudioPcmCallback pcmCallback,
+        nint callbackContext);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_StopSystemAudioCapture(nint handle);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int VS_IsSystemAudioCaptureActive(nint handle);
+
+    [DllImport(NativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void VS_SetSystemAudioCaptureVolume(nint handle, int volumePercent);
 }

@@ -1,6 +1,7 @@
 #include "native_bridge.h"
 
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 
@@ -33,6 +34,15 @@ void __cdecl calibrationCompleted(void* context, const wchar_t* resultsJson)
     state->condition.notify_one();
 }
 
+void __cdecl systemAudioPcm(void*,
+                            std::uint64_t,
+                            std::uint32_t,
+                            std::uint16_t,
+                            const std::int16_t*,
+                            int)
+{
+}
+
 bool verifyEnumeration(int(__cdecl* enumerate)(wchar_t*, int), const char* label)
 {
     const int required = enumerate(nullptr, 0);
@@ -63,6 +73,46 @@ bool verifyEnumeration(int(__cdecl* enumerate)(wchar_t*, int), const char* label
     }
     return true;
 }
+
+QJsonObject findVirtualCableRenderEndpoint()
+{
+    const int required = VS_GetRenderDevicesJson(nullptr, 0);
+    if (required <= 1) {
+        return {};
+    }
+    std::vector<wchar_t> buffer(static_cast<std::size_t>(required));
+    VS_GetRenderDevicesJson(buffer.data(), static_cast<int>(buffer.size()));
+    const QJsonArray devices = QJsonDocument::fromJson(
+                                   QString::fromWCharArray(buffer.data()).toUtf8())
+                                   .object()
+                                   .value(QStringLiteral("devices"))
+                                   .toArray();
+    for (const QJsonValue& value : devices) {
+        const QJsonObject device = value.toObject();
+        const QString name = device.value(QStringLiteral("name")).toString();
+        if (name.contains(QStringLiteral("CABLE Input"), Qt::CaseInsensitive)
+            || name.contains(QStringLiteral("VB-Audio Virtual Cable"), Qt::CaseInsensitive)) {
+            return device;
+        }
+    }
+    return {};
+}
+
+QJsonObject firstRenderEndpoint()
+{
+    const int required = VS_GetRenderDevicesJson(nullptr, 0);
+    if (required <= 1) {
+        return {};
+    }
+    std::vector<wchar_t> buffer(static_cast<std::size_t>(required));
+    VS_GetRenderDevicesJson(buffer.data(), static_cast<int>(buffer.size()));
+    const QJsonArray devices = QJsonDocument::fromJson(
+                                   QString::fromWCharArray(buffer.data()).toUtf8())
+                                   .object()
+                                   .value(QStringLiteral("devices"))
+                                   .toArray();
+    return devices.isEmpty() ? QJsonObject() : devices.first().toObject();
+}
 }
 
 int main()
@@ -82,11 +132,81 @@ int main()
 
     const bool renderValid = verifyEnumeration(&VS_GetRenderDevicesJson, "render enumeration");
     const bool captureValid = verifyEnumeration(&VS_GetCaptureDevicesJson, "capture enumeration");
+
+    const QJsonObject systemAudioEndpoint = firstRenderEndpoint();
+    if (!systemAudioEndpoint.isEmpty()) {
+        const std::wstring deviceId = systemAudioEndpoint.value(QStringLiteral("id"))
+                                          .toString()
+                                          .toStdWString();
+        const std::wstring deviceName = systemAudioEndpoint.value(QStringLiteral("name"))
+                                            .toString()
+                                            .toStdWString();
+        if (VS_StartSystemAudioCapture(handle,
+                                       deviceId.c_str(),
+                                       deviceName.c_str(),
+                                       100,
+                                       &systemAudioPcm,
+                                       nullptr)
+            == 0
+            || VS_IsSystemAudioCaptureActive(handle) == 0) {
+            std::cerr << "system audio loopback capture could not be opened\n";
+            VS_Destroy(handle);
+            return 1;
+        }
+        VS_SetSystemAudioCaptureVolume(handle, 80);
+        VS_StopSystemAudioCapture(handle);
+        if (VS_IsSystemAudioCaptureActive(handle) != 0) {
+            std::cerr << "system audio loopback capture remained active after stop\n";
+            VS_Destroy(handle);
+            return 1;
+        }
+        std::cout << "system audio loopback integration test passed\n";
+    }
+
     const std::int16_t samples[]{0, 16384, -16384, 32767, -32768};
     VS_SetRemoteMicrophoneConnected(handle, 1, 48000);
     VS_AppendRemoteMicrophonePcm16(handle, 123456, 48000, samples, 5);
     VS_AddRemoteMicrophoneClockSample(handle, 123456, 1'000'000'000ULL);
     VS_SetRemoteMicrophoneConnected(handle, 0, 0);
+
+    const QJsonObject virtualCable = findVirtualCableRenderEndpoint();
+    if (!virtualCable.isEmpty()) {
+        const std::wstring deviceId = virtualCable.value(QStringLiteral("id"))
+                                          .toString()
+                                          .toStdWString();
+        const std::wstring deviceName = virtualCable.value(QStringLiteral("name"))
+                                            .toString()
+                                            .toStdWString();
+        if (VS_StartRemoteMicrophoneOutput(handle,
+                                           deviceId.c_str(),
+                                           deviceName.c_str(),
+                                           48000,
+                                           20,
+                                           100)
+            == 0) {
+            std::cerr << "virtual cable render endpoint could not be opened\n";
+            VS_Destroy(handle);
+            return 1;
+        }
+        if (VS_IsRemoteMicrophoneOutputActive(handle) == 0) {
+            std::cerr << "virtual cable route did not become active\n";
+            VS_Destroy(handle);
+            return 1;
+        }
+        VS_SetRemoteMicrophoneConnected(handle, 1, 48000);
+        VS_AppendRemoteMicrophonePcm16(handle, 0, 48000, samples, 5);
+        VS_SetRemoteMicrophoneOutputVolume(handle, 80);
+        VS_StopRemoteMicrophoneOutput(handle);
+        VS_SetRemoteMicrophoneConnected(handle, 0, 0);
+        if (VS_IsRemoteMicrophoneOutputActive(handle) != 0) {
+            std::cerr << "virtual cable route remained active after stop\n";
+            VS_Destroy(handle);
+            return 1;
+        }
+        std::cout << "VB-CABLE render route integration test passed\n";
+    } else {
+        std::cout << "VB-CABLE render endpoint not installed; integration test skipped\n";
+    }
 
     const wchar_t* calibrationConfiguration = LR"({
         "microphone":{"id":"invalid-microphone","name":"Test microphone","isDefault":false},
