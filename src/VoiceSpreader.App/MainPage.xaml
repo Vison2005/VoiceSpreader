@@ -619,6 +619,7 @@
                                         IsEnabled="{x:Bind ViewModel.AdjustmentsEnabled, Mode=OneWay}"
                                         KeyDown="BufferNumberBox_KeyDown"
                                         LostFocus="BufferNumberBox_LostFocus"
+                                        PointerWheelChanged="BufferNumberBox_PointerWheelChanged"
                                         SmallChange="1"
                                         SpinButtonPlacementMode="Compact"
                                         Value="{x:Bind ViewModel.BufferMilliseconds, Mode=OneWay}"
@@ -721,89 +722,119 @@
                                 </StackPanel>
                                 <Border
                                     Grid.Column="1"
-                                    Padding="8,3"
+                                    MinWidth="72"
+                                    Height="28"
+                                    Padding="10,0"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Center"
                                     Background="{ThemeResource AccentFillColorSecondaryBrush}"
                                     CornerRadius="6">
                                     <TextBlock
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
                                         FontSize="12"
                                         FontWeight="SemiBold"
-                                        Text="{x:Bind ViewModel.ConnectedPhoneDeviceCountText, Mode=OneWay}" />
+                                        Text="{x:Bind ViewModel.ConnectedPhoneDeviceCountText, Mode=OneWay}"
+                                        TextAlignment="Center" />
                                 </Border>
                             </Grid>
 
-                            <ListView
-                                Grid.Row="1"
-                                MinHeight="82"
-                                MaxHeight="250"
-                                IsItemClickEnabled="False"
-                                ItemsSource="{x:Bind ViewModel.PhoneDevices, Mode=OneWay}"
-                                SelectionMode="None">
-                                <ListView.ItemContainerStyle>
-                                    <Style TargetType="ListViewItem">
-                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                        <Setter Property="Padding" Value="0" />
-                                        <Setter Property="Margin" Value="0,0,0,4" />
-                                    </Style>
-                                </ListView.ItemContainerStyle>
-                                <ListView.ItemTemplate>
-                                    <DataTemplate x:DataType="models:PhoneDeviceItem">
-                                        <Grid MinHeight="64" Padding="8,6" ColumnSpacing="12">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="28" />
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="150" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <FontIcon
-                                                VerticalAlignment="Center"
-                                                FontFamily="Segoe Fluent Icons"
-                                                FontSize="17"
-                                                Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
-                                                Glyph="&#xE8EA;" />
-                                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
-                                                <TextBlock
-                                                    FontWeight="SemiBold"
-                                                    Text="{x:Bind Name, Mode=OneWay}"
-                                                    TextTrimming="CharacterEllipsis" />
-                                                <TextBlock
-                                                    FontSize="11"
-                                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
-                                                    Text="{x:Bind ConnectionDetail, Mode=OneWay}"
-                                                    TextTrimming="CharacterEllipsis" />
-                                                <TextBlock
-                                                    FontSize="11"
-                                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
-                                                    Text="{x:Bind RouteSummary, Mode=OneWay}"
-                                                    TextTrimming="CharacterEllipsis" />
-                                            </StackPanel>
-                                            <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="4">
-                                                <ProgressBar
-                                                    Height="3"
-                                                    Maximum="100"
-                                                    Value="{x:Bind MicrophoneLevelPercent, Mode=OneWay}" />
-                                                <TextBlock
-                                                    FontSize="10"
-                                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
-                                                    Text="{x:Bind SynchronizationDetail, Mode=OneWay}"
-                                                    TextTrimming="CharacterEllipsis" />
-                                            </StackPanel>
-                                            <Button
-                                                Grid.Column="3"
-                                                Width="32"
-                                                Height="32"
-                                                Padding="0"
-                                                VerticalAlignment="Center"
-                                                AutomationProperties.Name="断开此设备"
-                                                Click="DisconnectPhoneDeviceButton_Click">
-                                                <SymbolIcon Symbol="Cancel" />
-                                                <ToolTipService.ToolTip>
-                                                    <ToolTip Content="断开此设备" />
-                                                </ToolTipService.ToolTip>
-                                            </Button>
-                                        </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
-                            </ListView>
+                            <Grid Grid.Row="1" MinHeight="82" MaxHeight="250">
+                                <ListView
+                                    IsItemClickEnabled="False"
+                                    ItemsSource="{x:Bind ViewModel.PhoneDevices, Mode=OneWay}"
+                                    SelectionMode="None">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="Margin" Value="0,0,0,4" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="models:PhoneDeviceItem">
+                                            <Grid MinHeight="64" Padding="8,6" ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="28" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="150" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <FontIcon
+                                                    VerticalAlignment="Center"
+                                                    FontFamily="Segoe Fluent Icons"
+                                                    FontSize="17"
+                                                    Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                                    Glyph="&#xE8EA;" />
+                                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
+                                                    <TextBlock
+                                                        FontWeight="SemiBold"
+                                                        Text="{x:Bind Name, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        FontSize="11"
+                                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                        Text="{x:Bind ConnectionDetail, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        FontSize="11"
+                                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                        Text="{x:Bind RouteSummary, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="4">
+                                                    <ProgressBar
+                                                        Height="3"
+                                                        Maximum="100"
+                                                        Value="{x:Bind MicrophoneLevelPercent, Mode=OneWay}" />
+                                                    <TextBlock
+                                                        FontSize="10"
+                                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                        Text="{x:Bind SynchronizationDetail, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                                <Button
+                                                    Grid.Column="3"
+                                                    Width="32"
+                                                    Height="32"
+                                                    Padding="0"
+                                                    VerticalAlignment="Center"
+                                                    AutomationProperties.Name="断开此设备"
+                                                    Click="DisconnectPhoneDeviceButton_Click">
+                                                    <SymbolIcon Symbol="Cancel" />
+                                                    <ToolTipService.ToolTip>
+                                                        <ToolTip Content="断开此设备" />
+                                                    </ToolTipService.ToolTip>
+                                                </Button>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+
+                                <StackPanel
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    IsHitTestVisible="False"
+                                    Spacing="5"
+                                    Visibility="{x:Bind ViewModel.PhoneDeviceEmptyStateVisibility, Mode=OneWay}">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontFamily="Segoe Fluent Icons"
+                                        FontSize="22"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Glyph="&#xE8EA;" />
+                                    <TextBlock
+                                        HorizontalAlignment="Center"
+                                        FontSize="13"
+                                        FontWeight="SemiBold"
+                                        Text="暂无已连接设备" />
+                                    <TextBlock
+                                        HorizontalAlignment="Center"
+                                        FontSize="11"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Text="等待手机或平板连接" />
+                                </StackPanel>
+                            </Grid>
 
                             <Grid Grid.Row="2" ColumnSpacing="8">
                                 <Grid.ColumnDefinitions>

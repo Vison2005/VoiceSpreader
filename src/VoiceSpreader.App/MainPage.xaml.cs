@@ -399,6 +399,35 @@ public sealed partial class MainPage : Page
         }
     }
 
+    private void BufferNumberBox_PointerWheelChanged(
+        object sender,
+        PointerRoutedEventArgs args)
+    {
+        if (sender is not NumberBox { IsEnabled: true } numberBox)
+        {
+            return;
+        }
+
+        var wheelDelta = args.GetCurrentPoint(numberBox).Properties.MouseWheelDelta;
+        if (wheelDelta == 0)
+        {
+            return;
+        }
+
+        var currentValue = TryReadNumber(numberBox, out var enteredValue)
+            ? (int)Math.Round(enteredValue)
+            : ViewModel.BufferMilliseconds;
+        var step = (args.KeyModifiers & VirtualKeyModifiers.Control) != 0 ? 10 : 1;
+        var notchCount = Math.Max(1, Math.Abs(wheelDelta) / 120);
+        var nextValue = Math.Clamp(
+            currentValue + Math.Sign(wheelDelta) * step * notchCount,
+            2,
+            100);
+
+        numberBox.Value = nextValue;
+        args.Handled = true;
+    }
+
     private void CommitNumberBox(NumberBox numberBox)
     {
         if (numberBox.DataContext is OutputEndpointItem)

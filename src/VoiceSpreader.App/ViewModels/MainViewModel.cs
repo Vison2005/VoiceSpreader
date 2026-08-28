@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 using VoiceSpreader.App.Models;
 using VoiceSpreader.App.Services;
 
@@ -385,6 +386,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (SetField(ref _isPhoneConnected, value))
             {
                 OnPropertyChanged(nameof(PhoneConnectionText));
+                OnPropertyChanged(nameof(PhoneDeviceEmptyStateVisibility));
                 NotifyPhoneRouteStateChanged();
                 NotifyPhonePlaybackStateChanged();
             }
@@ -405,6 +407,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public int ConnectedPhoneDeviceCount => PhoneDevices.Count;
 
+    public Visibility PhoneDeviceEmptyStateVisibility =>
+        IsPhoneConnected ? Visibility.Collapsed : Visibility.Visible;
+
     public int SelectedPhoneMicrophoneCount =>
         PhoneDevices.Count(device => device.UseAsMicrophone);
 
@@ -413,7 +418,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public string ConnectedPhoneDeviceCountText => ConnectedPhoneDeviceCount switch
     {
-        0 => "暂无设备",
+        0 => "0 台设备",
         1 => "1 台设备在线",
         _ => $"{ConnectedPhoneDeviceCount} 台设备在线",
     };
