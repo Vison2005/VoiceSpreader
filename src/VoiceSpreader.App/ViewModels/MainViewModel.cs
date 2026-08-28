@@ -19,6 +19,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private readonly Dictionary<string, OutputSettings> _savedOutputs;
     private readonly Dictionary<string, PhoneDeviceSettings> _savedPhoneDevices;
     private readonly SemaphoreSlim _settingsSaveGate = new(1, 1);
+    private readonly SemaphoreSlim _phoneMicrophoneRouteGate = new(1, 1);
     private AudioEndpoint? _selectedCapture;
     private AudioEndpoint? _selectedMicrophone;
     private int _bufferMilliseconds;
@@ -97,6 +98,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _phone.StatusChanged += Phone_StatusChanged;
         _phone.ConnectionChanged += Phone_ConnectionChanged;
         _phone.DevicesChanged += Phone_DevicesChanged;
+        _phone.MicrophoneRouteRequested += Phone_MicrophoneRouteRequested;
+        _phone.MicrophoneControlFailed += Phone_MicrophoneControlFailed;
         _phone.MicrophoneStreamingChanged += Phone_MicrophoneStreamingChanged;
         _phone.MicrophoneLevelChanged += Phone_MicrophoneLevelChanged;
         _phone.PlaybackStreamingChanged += Phone_PlaybackStreamingChanged;
@@ -671,24 +674,41 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task<string?> TogglePhoneMicrophoneRouteAsync()
     {
-        if (IsPhoneMicrophoneRouteBusy)
+        if (IsPhoneMicrophoneRouting || _engine.IsRemoteMicrophoneOutputActive)
         {
-            return null;
+            SetPhoneMicrophoneSelection(null);
+            return await SetPhoneMicrophoneRouteAsync(null, false);
         }
 
+        return await SetPhoneMicrophoneRouteAsync(
+            PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone),
+            true);
+    }
+
+    private async Task<string?> SetPhoneMicrophoneRouteAsync(
+        PhoneDeviceItem? selectedDevice,
+        bool enabled)
+    {
+        await _phoneMicrophoneRouteGate.WaitAsync();
         IsPhoneMicrophoneRouteBusy = true;
         try
         {
-            if (IsPhoneMicrophoneRouting || _engine.IsRemoteMicrophoneOutputActive)
+            if (!enabled)
             {
-                await _phone.SetMicrophoneEnabledAsync(false);
+                if (selectedDevice is not null)
+                {
+                    await _phone.SetMicrophoneEnabledAsync(selectedDevice.Id, false);
+                }
+                else
+                {
+                    await _phone.SetMicrophoneEnabledAsync(false);
+                }
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
                 IsPhoneMicrophoneRouting = false;
                 AddActivity("已停止移动设备麦克风输出");
                 return null;
             }
 
-            var selectedDevice = PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone);
             if (selectedDevice is null)
             {
                 return "请选择一台设备作为电脑麦克风。";
@@ -698,13 +718,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             {
                 return "未检测到 VB-CABLE 的 CABLE Input，请安装后刷新音频设备。";
             }
-            var started = await Task.Run(() => _engine.StartRemoteMicrophoneOutput(
-                output,
-                bufferMilliseconds: PhonePairingService.MicrophoneOutputBufferMilliseconds,
-                volumePercent: PhoneMicrophoneOutputVolume));
-            if (!started)
+            if (!_engine.IsRemoteMicrophoneOutputActive)
             {
-                return "无法打开 VB-CABLE 输出端点，请确认它未被其他应用独占。";
+                var started = await Task.Run(() => _engine.StartRemoteMicrophoneOutput(
+                    output,
+                    bufferMilliseconds: PhonePairingService.MicrophoneOutputBufferMilliseconds,
+                    volumePercent: PhoneMicrophoneOutputVolume));
+                if (!started)
+                {
+                    return "无法打开 VB-CABLE 输出端点，请确认它未被其他应用独占。";
+                }
             }
 
             IsPhoneMicrophoneRouting = true;
@@ -730,6 +753,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         finally
         {
             IsPhoneMicrophoneRouteBusy = false;
+            _phoneMicrophoneRouteGate.Release();
         }
     }
 
@@ -1357,18 +1381,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             PhoneDevices.Remove(removed);
         }
 
-        var preferredMicrophoneDeviceId = PhoneDevices
-            .FirstOrDefault(device => device.UseAsMicrophone)?.Id
-            ?? snapshots.FirstOrDefault(snapshot =>
-                _savedPhoneDevices.TryGetValue(snapshot.Id, out var saved)
-                && saved.UseAsMicrophone)?.Id;
-        if (preferredMicrophoneDeviceId is null
-            && PhoneDevices.Count == 0
-            && snapshots.Count > 0)
-        {
-            preferredMicrophoneDeviceId = snapshots[0].Id;
-        }
-
         foreach (var snapshot in snapshots)
         {
             var item = PhoneDevices.FirstOrDefault(device =>
@@ -1376,17 +1388,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (item is null)
             {
                 var hasSavedSettings = _savedPhoneDevices.TryGetValue(snapshot.Id, out var settings);
-                var shouldUseAsMicrophone = string.Equals(
-                    snapshot.Id,
-                    preferredMicrophoneDeviceId,
-                    StringComparison.OrdinalIgnoreCase);
                 settings ??= new PhoneDeviceSettings(
-                    UseAsMicrophone: shouldUseAsMicrophone,
+                    UseAsMicrophone: false,
                     UseAsSpeaker: snapshot.SupportsPlayback,
                     MicrophoneGainPercent: 100);
-                if (settings.UseAsMicrophone != shouldUseAsMicrophone)
+                // 麦克风开关表示当前会话的实际路由，不跨设备重连恢复。
+                if (settings.UseAsMicrophone)
                 {
-                    settings = settings with { UseAsMicrophone = shouldUseAsMicrophone };
+                    settings = settings with { UseAsMicrophone = false };
                     normalizedMicrophoneSelection |= hasSavedSettings;
                 }
                 item = new PhoneDeviceItem(snapshot, settings);
@@ -1398,10 +1407,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 if (!hasSavedSettings)
                 {
                     _ = SaveSettingsAsync();
-                }
-                if (IsPhoneMicrophoneRouting && item.UseAsMicrophone)
-                {
-                    _ = _phone.SetMicrophoneEnabledAsync(item.Id, true);
                 }
                 if (IsPhonePlaybackRouting && item.UseAsSpeaker && item.SupportsPlayback)
                 {
@@ -1483,31 +1488,20 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (device.UseAsMicrophone)
             {
-                _updatingPhoneMicrophoneSelection = true;
-                try
-                {
-                    foreach (var otherDevice in PhoneDevices.Where(item =>
-                                 !ReferenceEquals(item, device) && item.UseAsMicrophone))
-                    {
-                        otherDevice.UseAsMicrophone = false;
-                        _savedPhoneDevices[otherDevice.Id] = otherDevice.ToSettings();
-                    }
-                }
-                finally
-                {
-                    _updatingPhoneMicrophoneSelection = false;
-                }
+                SetPhoneMicrophoneSelection(device);
             }
 
-            if (IsPhoneMicrophoneRouting && device.UseAsMicrophone)
+            var shouldStopRoute = !device.UseAsMicrophone
+                                  && (device.MicrophoneStreaming
+                                      || !PhoneDevices.Any(item => item.UseAsMicrophone));
+            var error = await SetPhoneMicrophoneRouteAsync(
+                device,
+                device.UseAsMicrophone && !shouldStopRoute);
+            if (error is not null)
             {
-                await _phone.SetMicrophoneEnabledAsync(device.Id, true);
-            }
-            else if (IsPhoneMicrophoneRouting && !PhoneDevices.Any(item => item.UseAsMicrophone))
-            {
+                SetPhoneMicrophoneSelection(null);
                 await _phone.SetMicrophoneEnabledAsync(device.Id, false);
-                await Task.Run(_engine.StopRemoteMicrophoneOutput);
-                IsPhoneMicrophoneRouting = false;
+                NoticeMessage = error;
             }
         }
         else if (propertyName == nameof(PhoneDeviceItem.UseAsSpeaker)
@@ -1525,6 +1519,84 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         NotifyPhoneDeviceSelectionChanged();
         await SaveSettingsAsync();
+    }
+
+    private void SetPhoneMicrophoneSelection(PhoneDeviceItem? selectedDevice)
+    {
+        _updatingPhoneMicrophoneSelection = true;
+        try
+        {
+            foreach (var device in PhoneDevices)
+            {
+                var selected = ReferenceEquals(device, selectedDevice);
+                if (device.UseAsMicrophone != selected)
+                {
+                    device.UseAsMicrophone = selected;
+                }
+                _savedPhoneDevices[device.Id] = device.ToSettings();
+            }
+        }
+        finally
+        {
+            _updatingPhoneMicrophoneSelection = false;
+        }
+        NotifyPhoneDeviceSelectionChanged();
+        _ = SaveSettingsAsync();
+    }
+
+    private void Phone_MicrophoneRouteRequested(
+        object? sender,
+        PhoneMicrophoneRequestEventArgs args) => Dispatch(() =>
+    {
+        _ = ApplyPhoneMicrophoneRequestAsync(args);
+    });
+
+    private async Task ApplyPhoneMicrophoneRequestAsync(PhoneMicrophoneRequestEventArgs args)
+    {
+        var device = PhoneDevices.FirstOrDefault(item =>
+            string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+        if (device is null)
+        {
+            return;
+        }
+
+        if (!args.Enabled && !device.UseAsMicrophone && !device.MicrophoneStreaming)
+        {
+            await _phone.SetMicrophoneEnabledAsync(device.Id, false);
+            return;
+        }
+
+        SetPhoneMicrophoneSelection(args.Enabled ? device : null);
+        var error = await SetPhoneMicrophoneRouteAsync(
+            args.Enabled ? device : null,
+            args.Enabled);
+        if (error is null)
+        {
+            return;
+        }
+
+        SetPhoneMicrophoneSelection(null);
+        await _phone.SetMicrophoneEnabledAsync(device.Id, false);
+        NoticeMessage = $"{args.DeviceName} 无法启用麦克风：{error}";
+    }
+
+    private void Phone_MicrophoneControlFailed(
+        object? sender,
+        PhoneMicrophoneErrorEventArgs args) => Dispatch(() =>
+    {
+        _ = HandlePhoneMicrophoneFailureAsync(args);
+    });
+
+    private async Task HandlePhoneMicrophoneFailureAsync(PhoneMicrophoneErrorEventArgs args)
+    {
+        var device = PhoneDevices.FirstOrDefault(item =>
+            string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+        if (device is not null && (device.UseAsMicrophone || device.MicrophoneStreaming))
+        {
+            SetPhoneMicrophoneSelection(null);
+            await SetPhoneMicrophoneRouteAsync(device, false);
+        }
+        NoticeMessage = $"{args.DeviceName} 麦克风启动失败：{args.Message}";
     }
 
     private void Phone_MicrophoneStreamingChanged(object? sender, bool enabled) => Dispatch(() =>
@@ -1655,6 +1727,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _phone.StatusChanged -= Phone_StatusChanged;
         _phone.ConnectionChanged -= Phone_ConnectionChanged;
         _phone.DevicesChanged -= Phone_DevicesChanged;
+        _phone.MicrophoneRouteRequested -= Phone_MicrophoneRouteRequested;
+        _phone.MicrophoneControlFailed -= Phone_MicrophoneControlFailed;
         _phone.MicrophoneStreamingChanged -= Phone_MicrophoneStreamingChanged;
         _phone.MicrophoneLevelChanged -= Phone_MicrophoneLevelChanged;
         _phone.PlaybackStreamingChanged -= Phone_PlaybackStreamingChanged;

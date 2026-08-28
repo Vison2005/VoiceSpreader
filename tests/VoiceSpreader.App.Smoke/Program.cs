@@ -97,6 +97,19 @@ await protocol2Stream.WriteAsync("\n"u8.ToArray());
 var protocol2Accepted = await ReadLineAsync(protocol2Stream);
 Require(protocol2Accepted.Contains("\"protocol\":2", StringComparison.Ordinal),
     "TCP v2 握手未协商二进制下行协议");
+Require(protocol2Accepted.Contains("\"microphoneRequests\":true", StringComparison.Ordinal),
+    "TCP v2 握手未声明由 Windows 协调麦克风请求");
+
+var microphoneRequest = new TaskCompletionSource<PhoneMicrophoneRequestEventArgs>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
+void OnMicrophoneRouteRequested(object? _, PhoneMicrophoneRequestEventArgs args) =>
+    microphoneRequest.TrySetResult(args);
+service.MicrophoneRouteRequested += OnMicrophoneRouteRequested;
+await protocol2Stream.WriteAsync(CreateMicrophoneRequestFrame(enabled: true));
+var requestedRoute = await microphoneRequest.Task.WaitAsync(TimeSpan.FromSeconds(2));
+service.MicrophoneRouteRequested -= OnMicrophoneRouteRequested;
+Require(requestedRoute.DeviceId == "phone-1" && requestedRoute.Enabled,
+    "手机麦克风启用请求没有关联到正确设备");
 
 Require(await service.SetMicrophoneEnabledAsync("phone-1", true), "桌面端无法发送 v2 麦克风启用命令");
 var protocol2MicrophoneCommand = await ReadBinaryFrameAsync(protocol2Stream);
@@ -155,6 +168,8 @@ await WaitForAsync(() => service.IsMicrophoneStreaming, "第二台设备麦克�
 var framesBeforeRejectedSource = sink.MixedFrameCount;
 await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
 await protocol2Stream.WriteAsync(CreatePcmFrame(124000, 48_000, Enumerable.Repeat((short)3000, 1920).ToArray()));
+Require((await ReadBinaryFrameAsync(protocol2Stream)).SequenceEqual(new byte[] { 10, 0 }),
+    "服务端没有纠正非当前设备未经确认的麦克风传输状态");
 await Task.Delay(150);
 Require(sink.MixedFrameCount == framesBeforeRejectedSource,
     "已经停用的设备仍能向 VB-CABLE 写入麦克风数据");
@@ -194,6 +209,15 @@ static byte[] CreateMicrophoneStateFrame(bool enabled)
     var frame = new byte[6];
     BinaryPrimitives.WriteUInt32BigEndian(frame, 2);
     frame[4] = 2;
+    frame[5] = enabled ? (byte)1 : (byte)0;
+    return frame;
+}
+
+static byte[] CreateMicrophoneRequestFrame(bool enabled)
+{
+    var frame = new byte[6];
+    BinaryPrimitives.WriteUInt32BigEndian(frame, 2);
+    frame[4] = 7;
     frame[5] = enabled ? (byte)1 : (byte)0;
     return frame;
 }

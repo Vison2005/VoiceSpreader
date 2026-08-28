@@ -45,6 +45,30 @@ public sealed class PhoneConnectionChangedEventArgs(
     public string DeviceId { get; } = deviceId;
 }
 
+public sealed class PhoneMicrophoneRequestEventArgs(
+    string deviceId,
+    string deviceName,
+    bool enabled) : EventArgs
+{
+    public string DeviceId { get; } = deviceId;
+
+    public string DeviceName { get; } = deviceName;
+
+    public bool Enabled { get; } = enabled;
+}
+
+public sealed class PhoneMicrophoneErrorEventArgs(
+    string deviceId,
+    string deviceName,
+    string message) : EventArgs
+{
+    public string DeviceId { get; } = deviceId;
+
+    public string DeviceName { get; } = deviceName;
+
+    public string Message { get; } = message;
+}
+
 public sealed class PhonePairingService : IDisposable
 {
     private const int DiscoveryPort = 39741;
@@ -92,6 +116,10 @@ public sealed class PhonePairingService : IDisposable
     public event EventHandler<PhoneConnectionChangedEventArgs>? ConnectionChanged;
 
     public event EventHandler<PhoneDevicesChangedEventArgs>? DevicesChanged;
+
+    public event EventHandler<PhoneMicrophoneRequestEventArgs>? MicrophoneRouteRequested;
+
+    public event EventHandler<PhoneMicrophoneErrorEventArgs>? MicrophoneControlFailed;
 
     public event EventHandler<bool>? MicrophoneStreamingChanged;
 
@@ -558,6 +586,7 @@ public sealed class PhonePairingService : IDisposable
                     microphoneEnabled = false,
                     playbackEnabled = false,
                     multiDevice = true,
+                    microphoneRequests = protocol >= 2,
                 },
                 deviceSession,
                 cancellationToken);
@@ -727,10 +756,14 @@ public sealed class PhonePairingService : IDisposable
                 UpdateMicrophoneStreaming(session, body[1] != 0);
                 break;
             case 3:
+                var microphoneError = Encoding.UTF8.GetString(body, 1, body.Length - 1);
                 StatusChanged?.Invoke(
                     this,
-                    $"{session.Name} 麦克风：{Encoding.UTF8.GetString(body, 1, body.Length - 1)}");
+                    $"{session.Name} 麦克风：{microphoneError}");
                 UpdateMicrophoneStreaming(session, false);
+                MicrophoneControlFailed?.Invoke(
+                    this,
+                    new PhoneMicrophoneErrorEventArgs(session.Id, session.Name, microphoneError));
                 break;
             case 4 when body.Length >= 17:
                 ProcessClockFrame(session, body);
@@ -747,6 +780,11 @@ public sealed class PhonePairingService : IDisposable
                     session.PlaybackRequested = false;
                 }
                 UpdatePlaybackStreaming(session, false);
+                break;
+            case 7 when session.Protocol >= 2 && body.Length >= 2:
+                MicrophoneRouteRequested?.Invoke(
+                    this,
+                    new PhoneMicrophoneRequestEventArgs(session.Id, session.Name, body[1] != 0));
                 break;
         }
     }
@@ -832,6 +870,7 @@ public sealed class PhonePairingService : IDisposable
     {
         bool changed;
         bool acceptedEnabled;
+        bool rejectedEnable;
         lock (_sessionsLock)
         {
             if (!IsCurrentSessionLocked(session))
@@ -839,12 +878,18 @@ public sealed class PhonePairingService : IDisposable
                 return;
             }
             acceptedEnabled = enabled && IsActiveMicrophoneSessionLocked(session);
+            rejectedEnable = enabled && !acceptedEnabled;
             changed = session.MicrophoneStreaming != acceptedEnabled;
             session.MicrophoneStreaming = acceptedEnabled;
             if (!acceptedEnabled)
             {
                 session.MicrophoneLevelDbfs = -120;
             }
+        }
+        if (rejectedEnable)
+        {
+            StatusChanged?.Invoke(this, $"已拒绝 {session.Name} 未经 Windows 确认的麦克风传输。");
+            _ = SendMicrophoneCommandAsync(session, false);
         }
         if (!changed)
         {
