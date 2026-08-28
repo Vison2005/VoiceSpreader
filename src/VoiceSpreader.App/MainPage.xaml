@@ -960,7 +960,7 @@
                                         <TextBlock
                                             FontSize="11"
                                             Foreground="{ThemeResource VoiceSubtleTextBrush}"
-                                            Text="多台设备在电脑端混音后写入 VB-CABLE" />
+                                            Text="一次选择一台设备写入 VB-CABLE" />
                                     </StackPanel>
                                     <ComboBox
                                         Header="VB-CABLE 播放端点"
@@ -976,7 +976,7 @@
                                             <ColumnDefinition Width="42" />
                                         </Grid.ColumnDefinitions>
                                         <Slider
-                                            Header="混音输出音量"
+                                            Header="麦克风输出音量"
                                             Maximum="100"
                                             Minimum="0"
                                             Value="{x:Bind ViewModel.PhoneMicrophoneOutputVolume, Mode=TwoWay}" />

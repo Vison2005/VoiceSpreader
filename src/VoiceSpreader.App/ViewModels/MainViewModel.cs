@@ -59,6 +59,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private long _noticeRevision;
     private long? _calibrationNoticeRevision;
     private long _settingsRevision;
+    private bool _updatingPhoneMicrophoneSelection;
     private bool _disposed;
 
     public MainViewModel(AppHost host, DispatcherQueue dispatcher)
@@ -529,13 +530,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
             if (SelectedPhoneMicrophoneCount == 0)
             {
-                return "请选择至少一台在线设备加入麦克风混音。";
+                return "请选择一台在线设备作为电脑麦克风。";
             }
             if (IsPhoneMicrophoneRouting && IsPhoneMicrophoneStreaming)
             {
-                return SelectedPhoneMicrophoneCount == 1
-                    ? $"正在输出到 {SelectedPhoneMicrophoneOutput?.Name}；校准时在同步控制选择 CABLE Output。"
-                    : $"正在混音 {SelectedPhoneMicrophoneCount} 台设备；校准前请只保留一个麦克风。";
+                var device = PhoneDevices.First(item => item.UseAsMicrophone);
+                return $"正在接收 {device.Name} 并输出到 {SelectedPhoneMicrophoneOutput?.Name}。";
             }
             if (IsPhoneMicrophoneRouting)
             {
@@ -681,24 +681,17 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (IsPhoneMicrophoneRouting || _engine.IsRemoteMicrophoneOutputActive)
             {
+                await _phone.SetMicrophoneEnabledAsync(false);
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
-                var devicesToStop = PhoneDevices
-                    .Where(device => device.UseAsMicrophone || device.MicrophoneStreaming)
-                    .Select(device => device.Id)
-                    .ToArray();
-                await Task.WhenAll(devicesToStop.Select(
-                    deviceId => _phone.SetMicrophoneEnabledAsync(deviceId, false)));
                 IsPhoneMicrophoneRouting = false;
-                AddActivity("已停止移动设备麦克风混音输出");
+                AddActivity("已停止移动设备麦克风输出");
                 return null;
             }
 
-            var selectedDevices = PhoneDevices
-                .Where(device => device.UseAsMicrophone)
-                .ToArray();
-            if (selectedDevices.Length == 0)
+            var selectedDevice = PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone);
+            if (selectedDevice is null)
             {
-                return "请选择至少一台设备作为电脑麦克风。";
+                return "请选择一台设备作为电脑麦克风。";
             }
             var output = SelectedPhoneMicrophoneOutput;
             if (output is null)
@@ -707,7 +700,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
             var started = await Task.Run(() => _engine.StartRemoteMicrophoneOutput(
                 output,
-                bufferMilliseconds: 20,
+                bufferMilliseconds: PhonePairingService.MicrophoneOutputBufferMilliseconds,
                 volumePercent: PhoneMicrophoneOutputVolume));
             if (!started)
             {
@@ -715,15 +708,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
 
             IsPhoneMicrophoneRouting = true;
-            var microphoneResults = await Task.WhenAll(selectedDevices.Select(
-                device => _phone.SetMicrophoneEnabledAsync(device.Id, true)));
-            if (!microphoneResults.Any(result => result))
+            if (!await _phone.SetMicrophoneEnabledAsync(selectedDevice.Id, true))
             {
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
                 IsPhoneMicrophoneRouting = false;
                 return "输出端点已经打开，但未能让选中的设备开始回传麦克风。";
             }
-            AddActivity($"{microphoneResults.Count(result => result)} 台设备的麦克风将混音到 {output.Name}");
+            AddActivity($"{selectedDevice.Name} 的麦克风将输出到 {output.Name}");
             return null;
         }
         catch (Exception exception)
@@ -732,6 +723,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             {
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
             }
+            await _phone.SetMicrophoneEnabledAsync(false);
             IsPhoneMicrophoneRouting = false;
             return $"切换手机麦克风路由失败：{exception.Message}";
         }
@@ -1354,6 +1346,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void SyncPhoneDevices(IReadOnlyList<PhoneDeviceSnapshot> snapshots)
     {
+        var normalizedMicrophoneSelection = false;
         var snapshotIds = snapshots
             .Select(snapshot => snapshot.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -1364,6 +1357,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             PhoneDevices.Remove(removed);
         }
 
+        var preferredMicrophoneDeviceId = PhoneDevices
+            .FirstOrDefault(device => device.UseAsMicrophone)?.Id
+            ?? snapshots.FirstOrDefault(snapshot =>
+                _savedPhoneDevices.TryGetValue(snapshot.Id, out var saved)
+                && saved.UseAsMicrophone)?.Id;
+        if (preferredMicrophoneDeviceId is null
+            && PhoneDevices.Count == 0
+            && snapshots.Count > 0)
+        {
+            preferredMicrophoneDeviceId = snapshots[0].Id;
+        }
+
         foreach (var snapshot in snapshots)
         {
             var item = PhoneDevices.FirstOrDefault(device =>
@@ -1371,10 +1376,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (item is null)
             {
                 var hasSavedSettings = _savedPhoneDevices.TryGetValue(snapshot.Id, out var settings);
+                var shouldUseAsMicrophone = string.Equals(
+                    snapshot.Id,
+                    preferredMicrophoneDeviceId,
+                    StringComparison.OrdinalIgnoreCase);
                 settings ??= new PhoneDeviceSettings(
-                    UseAsMicrophone: true,
+                    UseAsMicrophone: shouldUseAsMicrophone,
                     UseAsSpeaker: snapshot.SupportsPlayback,
                     MicrophoneGainPercent: 100);
+                if (settings.UseAsMicrophone != shouldUseAsMicrophone)
+                {
+                    settings = settings with { UseAsMicrophone = shouldUseAsMicrophone };
+                    normalizedMicrophoneSelection |= hasSavedSettings;
+                }
                 item = new PhoneDeviceItem(snapshot, settings);
                 item.SettingsChanged += PhoneDevice_SettingsChanged;
                 PhoneDevices.Add(item);
@@ -1397,6 +1411,26 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             else
             {
                 item.Update(snapshot);
+            }
+        }
+
+        var selectedMicrophone = PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone);
+        if (selectedMicrophone is not null)
+        {
+            _updatingPhoneMicrophoneSelection = true;
+            try
+            {
+                foreach (var otherDevice in PhoneDevices.Where(device =>
+                             device.UseAsMicrophone && !ReferenceEquals(device, selectedMicrophone)))
+                {
+                    otherDevice.UseAsMicrophone = false;
+                    _savedPhoneDevices[otherDevice.Id] = otherDevice.ToSettings();
+                    normalizedMicrophoneSelection = true;
+                }
+            }
+            finally
+            {
+                _updatingPhoneMicrophoneSelection = false;
             }
         }
 
@@ -1423,6 +1457,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
         }
         NotifyPhoneDeviceSelectionChanged();
+        if (normalizedMicrophoneSelection)
+        {
+            _ = SaveSettingsAsync();
+        }
     }
 
     private async void PhoneDevice_SettingsChanged(object? sender, string propertyName)
@@ -1433,16 +1471,41 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _savedPhoneDevices[device.Id] = device.ToSettings();
+        if (_updatingPhoneMicrophoneSelection)
+        {
+            return;
+        }
         if (propertyName == nameof(PhoneDeviceItem.MicrophoneGainPercent))
         {
             _phone.SetMicrophoneGain(device.Id, device.MicrophoneGainPercent);
         }
-        else if (propertyName == nameof(PhoneDeviceItem.UseAsMicrophone)
-                 && IsPhoneMicrophoneRouting)
+        else if (propertyName == nameof(PhoneDeviceItem.UseAsMicrophone))
         {
-            await _phone.SetMicrophoneEnabledAsync(device.Id, device.UseAsMicrophone);
-            if (!PhoneDevices.Any(item => item.UseAsMicrophone))
+            if (device.UseAsMicrophone)
             {
+                _updatingPhoneMicrophoneSelection = true;
+                try
+                {
+                    foreach (var otherDevice in PhoneDevices.Where(item =>
+                                 !ReferenceEquals(item, device) && item.UseAsMicrophone))
+                    {
+                        otherDevice.UseAsMicrophone = false;
+                        _savedPhoneDevices[otherDevice.Id] = otherDevice.ToSettings();
+                    }
+                }
+                finally
+                {
+                    _updatingPhoneMicrophoneSelection = false;
+                }
+            }
+
+            if (IsPhoneMicrophoneRouting && device.UseAsMicrophone)
+            {
+                await _phone.SetMicrophoneEnabledAsync(device.Id, true);
+            }
+            else if (IsPhoneMicrophoneRouting && !PhoneDevices.Any(item => item.UseAsMicrophone))
+            {
+                await _phone.SetMicrophoneEnabledAsync(device.Id, false);
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
                 IsPhoneMicrophoneRouting = false;
             }

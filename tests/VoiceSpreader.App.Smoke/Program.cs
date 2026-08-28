@@ -56,6 +56,9 @@ await stream.WriteAsync("\n"u8.ToArray());
 var accepted = await ReadLineAsync(stream);
 Require(accepted.Contains("\"accepted\"", StringComparison.Ordinal), "TCP 握手未被接受");
 
+Require(await service.SetMicrophoneEnabledAsync(true), "桌面端无法发送旧协议麦克风启用命令");
+var startCommand = await ReadLineAsync(stream);
+Require(startCommand.Contains("\"enabled\":true", StringComparison.Ordinal), "旧协议麦克风启用命令格式无效");
 await stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
 await WaitForAsync(() => service.IsMicrophoneStreaming, "手机麦克风启用状态未写入会话");
 
@@ -67,7 +70,7 @@ await stream.WriteAsync(CreateClockFrame(123456, 1_000_000_000));
 await stream.WriteAsync(CreateClockFrame(123936, 1_010_000_000));
 await WaitForAsync(
     () => sink.MixedSamples.Take(pcmPrefix.Length).SequenceEqual(pcmPrefix),
-    "PCM 数据未抵达 VB-CABLE 集中混音接口");
+    "PCM 数据未抵达 VB-CABLE 单路输出接口");
 
 Require(await service.SetMicrophoneEnabledAsync(false), "桌面端无法发送麦克风停用命令");
 var command = await ReadLineAsync(stream);
@@ -142,15 +145,24 @@ await WaitForAsync(() => service.ConnectedDevices.Count == 2, "服务端没有�
 
 service.SetMicrophoneGain("phone-1", 100);
 service.SetMicrophoneGain("tablet-1", 50);
-Require(await service.SetMicrophoneEnabledAsync("tablet-1", true), "桌面端无法启用第二台设备麦克风");
+Require(await service.SetMicrophoneEnabledAsync("tablet-1", true), "桌面端无法切换到第二台设备麦克风");
+Require((await ReadBinaryFrameAsync(protocol2Stream)).SequenceEqual(new byte[] { 10, 0 }),
+    "切换麦克风来源时没有停用第一台设备");
 Require((await ReadBinaryFrameAsync(tabletStream)).SequenceEqual(new byte[] { 10, 1 }),
     "第二台设备麦克风命令格式无效");
 await tabletStream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
-await protocol2Stream.WriteAsync(CreatePcmFrame(124000, 48_000, Enumerable.Repeat((short)1000, 1920).ToArray()));
+await WaitForAsync(() => service.IsMicrophoneStreaming, "第二台设备麦克风启用状态未写入会话");
+var framesBeforeRejectedSource = sink.MixedFrameCount;
+await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
+await protocol2Stream.WriteAsync(CreatePcmFrame(124000, 48_000, Enumerable.Repeat((short)3000, 1920).ToArray()));
+await Task.Delay(150);
+Require(sink.MixedFrameCount == framesBeforeRejectedSource,
+    "已经停用的设备仍能向 VB-CABLE 写入麦克风数据");
 await tabletStream.WriteAsync(CreatePcmFrame(224000, 48_000, Enumerable.Repeat((short)2000, 1920).ToArray()));
 await WaitForAsync(
-    () => sink.MixedSamples.FirstOrDefault() is >= 1413 and <= 1415,
-    "多设备麦克风没有按固定增益进入集中混音输出");
+    () => sink.MixedFrameCount > framesBeforeRejectedSource
+          && sink.MixedSamples.FirstOrDefault() == 1000,
+    "当前设备麦克风没有按独立增益进入单路输出");
 
 Require(await service.SetPlaybackEnabledAsync("tablet-1", true), "桌面端无法启用第二台设备播放");
 Require((await ReadBinaryFrameAsync(tabletStream)).SequenceEqual(new byte[] { 11, 1 }),

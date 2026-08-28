@@ -118,7 +118,7 @@ public sealed class PhoneDeviceItem : INotifyPropertyChanged
             {
                 return "麦克风未传输";
             }
-            return $"缓冲 {MicrophoneBufferedMilliseconds} ms · 时钟 {ClockDriftPpm:+0.0;-0.0;0.0} ppm";
+            return $"输出缓冲 {MicrophoneBufferedMilliseconds} ms · 时钟 {ClockDriftPpm:+0.0;-0.0;0.0} ppm";
         }
     }
 
