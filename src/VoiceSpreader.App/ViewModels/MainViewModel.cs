@@ -56,6 +56,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private string _statusMessage = "选择一个系统声音来源和至少一个输出设备。";
     private string _programLevelText = "节目电平 -- dBFS · 探针暂停";
     private string? _noticeMessage;
+    private long _noticeRevision;
+    private long? _calibrationNoticeRevision;
     private long _settingsRevision;
     private bool _disposed;
 
@@ -331,6 +333,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (SetField(ref _noticeMessage, value))
             {
+                _noticeRevision++;
                 OnPropertyChanged(nameof(HasNotice));
             }
         }
@@ -1042,6 +1045,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return "自动校准至少需要两个输出设备。";
         }
 
+        ClearCalibrationNotice();
         IsCalibrating = _engine.StartCalibration(new CalibrationConfiguration(SelectedMicrophone, outputs));
         if (!IsCalibrating)
         {
@@ -1185,7 +1189,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void Engine_ErrorOccurred(object? sender, string message) => Dispatch(() =>
     {
-        NoticeMessage = message;
+        if (IsCalibrating || IsStoppingCalibration || _engine.IsCalibrating)
+        {
+            SetCalibrationNotice(message);
+        }
+        else
+        {
+            NoticeMessage = message;
+        }
         StatusBadge = "需要处理";
         StatusTitle = "同步遇到问题";
         StatusMessage = message;
@@ -1233,6 +1244,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         IsCalibrating = false;
         IsStoppingCalibration = false;
+        if (args.Outcome != CalibrationOutcome.Failed)
+        {
+            ClearCalibrationNotice();
+        }
         if (args.Outcome == CalibrationOutcome.Cancelled)
         {
             StatusBadge = "已取消";
@@ -1278,6 +1293,26 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             : "未获得可应用的测量结果，请检查麦克风位置和播放音量。";
         AddActivity(StatusMessage);
     });
+
+    private void SetCalibrationNotice(string message)
+    {
+        NoticeMessage = message;
+        _calibrationNoticeRevision = _noticeRevision;
+    }
+
+    private void ClearCalibrationNotice()
+    {
+        if (_calibrationNoticeRevision is not { } calibrationRevision)
+        {
+            return;
+        }
+
+        _calibrationNoticeRevision = null;
+        if (_noticeRevision == calibrationRevision)
+        {
+            NoticeMessage = null;
+        }
+    }
 
     private void Bluetooth_StatusChanged(object? sender, string message) => Dispatch(() =>
     {

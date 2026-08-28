@@ -1,6 +1,6 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [string]$Version = '1.2.1.1',
+    [string]$Version = '1.2.1.2',
     [string]$Publisher = 'CN=Vison2005'
 )
 
@@ -131,23 +131,32 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "SignTool 签名失败，退出码 $LASTEXITCODE"
 }
-$trustedCertificatePath = "Cert:\CurrentUser\Root\$($certificate.Thumbprint)"
-$certificateWasTrusted = Test-Path -LiteralPath $trustedCertificatePath
-if (-not $certificateWasTrusted) {
-    Import-Certificate `
-        -FilePath $certificatePath `
-        -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+$signature = Get-AuthenticodeSignature -LiteralPath $packagePath
+if ($null -eq $signature.SignerCertificate) {
+    throw 'MSIX 中没有可读取的签名证书。'
 }
-try {
-    & $signTool verify /pa /v $packagePath
-    if ($LASTEXITCODE -ne 0) {
-        throw "SignTool 验证失败，退出码 $LASTEXITCODE"
-    }
+$signerMatchesCertificate = $signature.SignerCertificate.Thumbprint.Equals(
+    $certificate.Thumbprint,
+    [StringComparison]::OrdinalIgnoreCase)
+if (-not $signerMatchesCertificate) {
+    throw 'MSIX 签名者与发布证书不一致。'
 }
-finally {
-    if (-not $certificateWasTrusted -and (Test-Path -LiteralPath $trustedCertificatePath)) {
-        Remove-Item -LiteralPath $trustedCertificatePath -Force
-    }
+if ($signature.Status -notin @(
+        [Management.Automation.SignatureStatus]::Valid,
+        [Management.Automation.SignatureStatus]::UnknownError)) {
+    throw "MSIX Authenticode 验证失败：$($signature.StatusMessage)"
+}
+
+$codeSigningOid = '1.3.6.1.5.5.7.3.3'
+$hasCodeSigningEku = @($certificate.Extensions |
+        Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } |
+        ForEach-Object EnhancedKeyUsages |
+        Where-Object Value -EQ $codeSigningOid).Count -gt 0
+$certificateIsSelfSigned = $certificate.Subject -eq $certificate.Issuer
+$now = Get-Date
+$certificateIsCurrent = $now -ge $certificate.NotBefore -and $now -le $certificate.NotAfter
+if (-not $hasCodeSigningEku -or -not $certificateIsSelfSigned -or -not $certificateIsCurrent) {
+    throw 'MSIX 发布证书不是当前有效的自签名代码签名证书。'
 }
 
 $hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
