@@ -790,12 +790,39 @@ public sealed class PhonePairingService : IDisposable
                 UpdatePlaybackStreaming(session, false);
                 break;
             case 7 when session.Protocol >= 2 && body.Length >= 2:
+                var microphoneRouteEnabled = body[1] != 0;
+                if (!microphoneRouteEnabled)
+                {
+                    var stateChanged = false;
+                    lock (_sessionsLock)
+                    {
+                        if (!IsCurrentSessionLocked(session))
+                        {
+                            break;
+                        }
+                        if (IsActiveMicrophoneSessionLocked(session))
+                        {
+                            _activeMicrophoneDeviceId = null;
+                            Interlocked.Increment(ref _microphoneSelectionRevision);
+                            stateChanged = true;
+                        }
+                        session.MicrophoneReportedActive = false;
+                        stateChanged |= DeactivateMicrophoneSessionLocked(session);
+                    }
+                    if (stateChanged)
+                    {
+                        RaiseMicrophoneStateChanged();
+                    }
+                }
                 StatusChanged?.Invoke(
                     this,
-                    $"{session.Name} 请求{(body[1] != 0 ? "启用" : "停止")}手机麦克风路由。");
+                    $"{session.Name} 请求{(microphoneRouteEnabled ? "启用" : "停止")}手机麦克风路由。");
                 MicrophoneRouteRequested?.Invoke(
                     this,
-                    new PhoneMicrophoneRequestEventArgs(session.Id, session.Name, body[1] != 0));
+                    new PhoneMicrophoneRequestEventArgs(
+                        session.Id,
+                        session.Name,
+                        microphoneRouteEnabled));
                 break;
         }
     }
@@ -889,16 +916,20 @@ public sealed class PhonePairingService : IDisposable
                 return;
             }
             var wasActiveSession = IsActiveMicrophoneSessionLocked(session);
-            var wasStreaming = session.MicrophoneStreaming;
             session.MicrophoneReportedActive = enabled;
             acceptedEnabled = enabled && IsActiveMicrophoneSessionLocked(session);
             requestRouteChange = enabled && !wasActiveSession
-                                 || !enabled && wasActiveSession && wasStreaming;
+                                 || !enabled && wasActiveSession;
             changed = session.MicrophoneStreaming != acceptedEnabled;
             session.MicrophoneStreaming = acceptedEnabled;
             if (!acceptedEnabled)
             {
                 session.MicrophoneLevelDbfs = -120;
+            }
+            if (!enabled && wasActiveSession)
+            {
+                _activeMicrophoneDeviceId = null;
+                Interlocked.Increment(ref _microphoneSelectionRevision);
             }
         }
         if (requestRouteChange)

@@ -1561,15 +1561,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        if (!args.Enabled && !device.UseAsMicrophone && !device.MicrophoneStreaming)
-        {
-            await _phone.SetMicrophoneEnabledAsync(device.Id, false);
-            return;
-        }
-
         SetPhoneMicrophoneSelection(args.Enabled ? device : null);
         var error = await SetPhoneMicrophoneRouteAsync(
-            args.Enabled ? device : null,
+            device,
             args.Enabled);
         if (error is null)
         {

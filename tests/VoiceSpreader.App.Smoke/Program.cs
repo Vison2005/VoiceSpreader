@@ -150,6 +150,27 @@ Require((await ReadBinaryFrameAsync(protocol2Stream)).SequenceEqual(new byte[] {
 await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
 await WaitForAsync(() => service.IsMicrophoneStreaming, "v2 麦克风重新启用状态未写入会话");
 
+var explicitStopRequest = new TaskCompletionSource<PhoneMicrophoneRequestEventArgs>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
+void OnExplicitMicrophoneStopRequested(object? _, PhoneMicrophoneRequestEventArgs args) =>
+    explicitStopRequest.TrySetResult(args);
+service.MicrophoneRouteRequested += OnExplicitMicrophoneStopRequested;
+await protocol2Stream.WriteAsync(CreateMicrophoneRequestFrame(enabled: false));
+var requestedExplicitStop = await explicitStopRequest.Task.WaitAsync(TimeSpan.FromSeconds(2));
+service.MicrophoneRouteRequested -= OnExplicitMicrophoneStopRequested;
+Require(requestedExplicitStop.DeviceId == "phone-1" && !requestedExplicitStop.Enabled,
+    "手机主动停止请求没有关联到正确设备");
+await WaitForAsync(() => !service.IsMicrophoneStreaming,
+    "手机主动停止请求没有立即撤销 Windows 麦克风状态");
+
+Require(await service.SetMicrophoneEnabledAsync("phone-1", true),
+    "手机主动停止后无法再次启用 v2 麦克风");
+Require((await ReadBinaryFrameAsync(protocol2Stream)).SequenceEqual(new byte[] { 10, 1 }),
+    "手机主动停止后重新启用命令格式无效");
+await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
+await WaitForAsync(() => service.IsMicrophoneStreaming,
+    "手机主动停止后重新启用状态未写入会话");
+
 Require(await service.SetPlaybackEnabledAsync("phone-1", true), "桌面端无法发送手机播放启用命令");
 var playbackCommand = await ReadBinaryFrameAsync(protocol2Stream);
 Require(playbackCommand.SequenceEqual(new byte[] { 11, 1 }), "手机播放启用命令格式无效");
