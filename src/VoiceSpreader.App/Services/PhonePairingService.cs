@@ -312,6 +312,7 @@ public sealed class PhonePairingService : IDisposable
                     _activeMicrophoneDeviceId = null;
                     Interlocked.Increment(ref _microphoneSelectionRevision);
                 }
+                session.MicrophoneReportedActive = false;
                 changed = DeactivateMicrophoneSessionLocked(session);
             }
             if (changed)
@@ -334,7 +335,13 @@ public sealed class PhonePairingService : IDisposable
                 .ToArray();
             foreach (var otherSession in otherSessions)
             {
+                otherSession.MicrophoneReportedActive = false;
                 selectionChanged |= DeactivateMicrophoneSessionLocked(otherSession);
+            }
+            if (session.MicrophoneReportedActive && !session.MicrophoneStreaming)
+            {
+                session.MicrophoneStreaming = true;
+                selectionChanged = true;
             }
         }
         if (selectionChanged)
@@ -365,6 +372,7 @@ public sealed class PhonePairingService : IDisposable
                 Interlocked.Increment(ref _microphoneSelectionRevision);
             }
             DeactivateMicrophoneSessionLocked(session);
+            session.MicrophoneReportedActive = false;
         }
         RaiseMicrophoneStateChanged();
         return false;
@@ -782,6 +790,9 @@ public sealed class PhonePairingService : IDisposable
                 UpdatePlaybackStreaming(session, false);
                 break;
             case 7 when session.Protocol >= 2 && body.Length >= 2:
+                StatusChanged?.Invoke(
+                    this,
+                    $"{session.Name} 请求{(body[1] != 0 ? "启用" : "停止")}手机麦克风路由。");
                 MicrophoneRouteRequested?.Invoke(
                     this,
                     new PhoneMicrophoneRequestEventArgs(session.Id, session.Name, body[1] != 0));
@@ -870,15 +881,19 @@ public sealed class PhonePairingService : IDisposable
     {
         bool changed;
         bool acceptedEnabled;
-        bool rejectedEnable;
+        bool requestRouteChange;
         lock (_sessionsLock)
         {
             if (!IsCurrentSessionLocked(session))
             {
                 return;
             }
+            var wasActiveSession = IsActiveMicrophoneSessionLocked(session);
+            var wasStreaming = session.MicrophoneStreaming;
+            session.MicrophoneReportedActive = enabled;
             acceptedEnabled = enabled && IsActiveMicrophoneSessionLocked(session);
-            rejectedEnable = enabled && !acceptedEnabled;
+            requestRouteChange = enabled && !wasActiveSession
+                                 || !enabled && wasActiveSession && wasStreaming;
             changed = session.MicrophoneStreaming != acceptedEnabled;
             session.MicrophoneStreaming = acceptedEnabled;
             if (!acceptedEnabled)
@@ -886,10 +901,30 @@ public sealed class PhonePairingService : IDisposable
                 session.MicrophoneLevelDbfs = -120;
             }
         }
-        if (rejectedEnable)
+        if (requestRouteChange)
         {
-            StatusChanged?.Invoke(this, $"已拒绝 {session.Name} 未经 Windows 确认的麦克风传输。");
-            _ = SendMicrophoneCommandAsync(session, false);
+            var handler = MicrophoneRouteRequested;
+            if (handler is not null)
+            {
+                StatusChanged?.Invoke(
+                    this,
+                    $"{session.Name} 请求{(enabled ? "启用" : "停止")}手机麦克风路由。");
+                handler.Invoke(
+                    this,
+                    new PhoneMicrophoneRequestEventArgs(session.Id, session.Name, enabled));
+            }
+            else if (enabled)
+            {
+                lock (_sessionsLock)
+                {
+                    if (IsCurrentSessionLocked(session)
+                        && !IsActiveMicrophoneSessionLocked(session))
+                    {
+                        session.MicrophoneReportedActive = false;
+                    }
+                }
+                _ = SendMicrophoneCommandAsync(session, false);
+            }
         }
         if (!changed)
         {
@@ -1397,6 +1432,8 @@ public sealed class PhonePairingService : IDisposable
         public DateTimeOffset LastSeen { get; set; } = DateTimeOffset.UtcNow;
 
         public bool MicrophoneStreaming { get; set; }
+
+        public bool MicrophoneReportedActive { get; set; }
 
         public volatile bool PlaybackRequested;
 

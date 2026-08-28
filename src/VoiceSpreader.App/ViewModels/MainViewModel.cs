@@ -1557,6 +1557,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
         if (device is null)
         {
+            await _phone.SetMicrophoneEnabledAsync(args.DeviceId, false);
             return;
         }
 
