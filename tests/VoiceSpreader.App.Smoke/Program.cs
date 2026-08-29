@@ -117,12 +117,12 @@ void OnLegacyMicrophoneRouteRequested(object? _, PhoneMicrophoneRequestEventArgs
     legacyMicrophoneRequest.TrySetResult(args);
 service.MicrophoneRouteRequested += OnLegacyMicrophoneRouteRequested;
 await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
-var requestedLegacyRoute = await legacyMicrophoneRequest.Task.WaitAsync(TimeSpan.FromSeconds(2));
+await Task.Delay(120);
 service.MicrophoneRouteRequested -= OnLegacyMicrophoneRouteRequested;
-Require(requestedLegacyRoute.DeviceId == "phone-1" && requestedLegacyRoute.Enabled,
-    "旧版手机实际采集状态没有转换为 Windows 路由请求");
+Require(!legacyMicrophoneRequest.Task.IsCompleted,
+    "手机实际采集状态被错误地当成了新的启用请求");
 Require(!service.IsMicrophoneStreaming,
-    "Windows 在 VB-CABLE 路由建立前不应接受旧版手机音频");
+    "Windows 在 VB-CABLE 路由建立前不应接受手机音频");
 
 Require(await service.SetMicrophoneEnabledAsync("phone-1", true), "桌面端无法发送 v2 麦克风启用命令");
 var protocol2MicrophoneCommand = await ReadBinaryFrameAsync(protocol2Stream);
@@ -138,10 +138,10 @@ void OnLegacyMicrophoneStopRequested(object? _, PhoneMicrophoneRequestEventArgs 
     legacyStopRequest.TrySetResult(args);
 service.MicrophoneRouteRequested += OnLegacyMicrophoneStopRequested;
 await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: false));
-var requestedLegacyStop = await legacyStopRequest.Task.WaitAsync(TimeSpan.FromSeconds(2));
+await Task.Delay(120);
 service.MicrophoneRouteRequested -= OnLegacyMicrophoneStopRequested;
-Require(requestedLegacyStop.DeviceId == "phone-1" && !requestedLegacyStop.Enabled,
-    "旧版手机停止采集状态没有转换为 Windows 路由停止请求");
+Require(!legacyStopRequest.Task.IsCompleted,
+    "手机实际停止状态被错误地当成了新的停止请求");
 await WaitForAsync(() => !service.IsMicrophoneStreaming, "旧版手机停止后实际传输状态没有关闭");
 
 Require(await service.SetMicrophoneEnabledAsync("phone-1", true), "桌面端无法重新启用 v2 麦克风");

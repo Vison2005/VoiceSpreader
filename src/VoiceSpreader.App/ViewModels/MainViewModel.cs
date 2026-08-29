@@ -1597,7 +1597,20 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void Phone_MicrophoneStreamingChanged(object? sender, bool enabled) => Dispatch(() =>
     {
         IsPhoneMicrophoneStreaming = enabled;
+        if (!enabled && IsPhoneMicrophoneRouting && !IsPhoneMicrophoneRouteBusy)
+        {
+            // 手机因权限、系统回收或网络异常主动停止时，只收尾本地输出，不再反向发送停止命令。
+            SetPhoneMicrophoneSelection(null);
+            _ = StopPhoneMicrophoneRouteAfterRemoteStateAsync();
+        }
     });
+
+    private async Task StopPhoneMicrophoneRouteAfterRemoteStateAsync()
+    {
+        await Task.Run(_engine.StopRemoteMicrophoneOutput);
+        IsPhoneMicrophoneRouting = false;
+        AddActivity("手机麦克风已停止，本地输出端点已释放");
+    }
 
     private void Phone_MicrophoneLevelChanged(object? sender, double levelDbfs) => Dispatch(() =>
     {

@@ -761,6 +761,7 @@ public sealed class PhonePairingService : IDisposable
                 ProcessPcmFrame(session, body);
                 break;
             case 2 when body.Length >= 2:
+                // 这是手机对实际采集结果的确认，只更新状态；主动启停必须使用类型 7 请求帧。
                 UpdateMicrophoneStreaming(session, body[1] != 0);
                 break;
             case 3:
@@ -908,7 +909,6 @@ public sealed class PhonePairingService : IDisposable
     {
         bool changed;
         bool acceptedEnabled;
-        bool requestRouteChange;
         lock (_sessionsLock)
         {
             if (!IsCurrentSessionLocked(session))
@@ -918,8 +918,6 @@ public sealed class PhonePairingService : IDisposable
             var wasActiveSession = IsActiveMicrophoneSessionLocked(session);
             session.MicrophoneReportedActive = enabled;
             acceptedEnabled = enabled && IsActiveMicrophoneSessionLocked(session);
-            requestRouteChange = enabled && !wasActiveSession
-                                 || !enabled && wasActiveSession;
             changed = session.MicrophoneStreaming != acceptedEnabled;
             session.MicrophoneStreaming = acceptedEnabled;
             if (!acceptedEnabled)
@@ -930,31 +928,6 @@ public sealed class PhonePairingService : IDisposable
             {
                 _activeMicrophoneDeviceId = null;
                 Interlocked.Increment(ref _microphoneSelectionRevision);
-            }
-        }
-        if (requestRouteChange)
-        {
-            var handler = MicrophoneRouteRequested;
-            if (handler is not null)
-            {
-                StatusChanged?.Invoke(
-                    this,
-                    $"{session.Name} 请求{(enabled ? "启用" : "停止")}手机麦克风路由。");
-                handler.Invoke(
-                    this,
-                    new PhoneMicrophoneRequestEventArgs(session.Id, session.Name, enabled));
-            }
-            else if (enabled)
-            {
-                lock (_sessionsLock)
-                {
-                    if (IsCurrentSessionLocked(session)
-                        && !IsActiveMicrophoneSessionLocked(session))
-                    {
-                        session.MicrophoneReportedActive = false;
-                    }
-                }
-                _ = SendMicrophoneCommandAsync(session, false);
             }
         }
         if (!changed)
