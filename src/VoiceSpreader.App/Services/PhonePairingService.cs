@@ -94,6 +94,7 @@ public sealed class PhonePairingService : IDisposable
     private string _pairingCode = string.Empty;
     private string? _activeMicrophoneDeviceId;
     private long _microphoneSelectionRevision;
+    private long _microphoneControlRevision;
     private bool _disposed;
 
     public PhonePairingService(
@@ -259,9 +260,14 @@ public sealed class PhonePairingService : IDisposable
 
     public async Task<bool> SetMicrophoneEnabledAsync(bool enabled)
     {
+        var controlRevision = Interlocked.Increment(ref _microphoneControlRevision);
         await _microphoneSelectionGate.WaitAsync();
         try
         {
+            if (controlRevision != Volatile.Read(ref _microphoneControlRevision))
+            {
+                return true;
+            }
             var session = !enabled
                 ? GetActiveMicrophoneSession() ?? GetFirstSession()
                 : GetFirstSession();
@@ -280,9 +286,14 @@ public sealed class PhonePairingService : IDisposable
 
     public async Task<bool> SetMicrophoneEnabledAsync(string deviceId, bool enabled)
     {
+        var controlRevision = Interlocked.Increment(ref _microphoneControlRevision);
         await _microphoneSelectionGate.WaitAsync();
         try
         {
+            if (controlRevision != Volatile.Read(ref _microphoneControlRevision))
+            {
+                return true;
+            }
             var session = GetSession(deviceId);
             if (session is null)
             {

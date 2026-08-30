@@ -60,6 +60,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private long _noticeRevision;
     private long? _calibrationNoticeRevision;
     private long _settingsRevision;
+    private long _phoneMicrophoneRouteIntentRevision;
     private bool _updatingPhoneMicrophoneSelection;
     private bool _disposed;
 
@@ -677,19 +678,26 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (IsPhoneMicrophoneRouting || _engine.IsRemoteMicrophoneOutputActive)
         {
             SetPhoneMicrophoneSelection(null);
-            return await SetPhoneMicrophoneRouteAsync(null, false);
+            var stopIntent = BeginPhoneMicrophoneRouteIntent();
+            return await SetPhoneMicrophoneRouteAsync(null, false, stopIntent);
         }
 
-        return await SetPhoneMicrophoneRouteAsync(
-            PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone),
-            true);
+        var selectedDevice = PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone);
+        var startIntent = BeginPhoneMicrophoneRouteIntent();
+        return await SetPhoneMicrophoneRouteAsync(selectedDevice, true, startIntent);
     }
 
     private async Task<string?> SetPhoneMicrophoneRouteAsync(
         PhoneDeviceItem? selectedDevice,
-        bool enabled)
+        bool enabled,
+        long intentRevision)
     {
         await _phoneMicrophoneRouteGate.WaitAsync();
+        if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+        {
+            _phoneMicrophoneRouteGate.Release();
+            return null;
+        }
         IsPhoneMicrophoneRouteBusy = true;
         try
         {
@@ -702,6 +710,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 else
                 {
                     await _phone.SetMicrophoneEnabledAsync(false);
+                }
+                if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+                {
+                    return null;
                 }
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
                 IsPhoneMicrophoneRouting = false;
@@ -728,9 +740,20 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 {
                     return "无法打开 VB-CABLE 输出端点，请确认它未被其他应用独占。";
                 }
+                if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+                {
+                    await Task.Run(_engine.StopRemoteMicrophoneOutput);
+                    return null;
+                }
             }
 
             IsPhoneMicrophoneRouting = true;
+            if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+            {
+                await Task.Run(_engine.StopRemoteMicrophoneOutput);
+                IsPhoneMicrophoneRouting = false;
+                return null;
+            }
             if (!await _phone.SetMicrophoneEnabledAsync(selectedDevice.Id, true))
             {
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
@@ -742,6 +765,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception exception)
         {
+            if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+            {
+                return null;
+            }
             if (_engine.IsRemoteMicrophoneOutputActive)
             {
                 await Task.Run(_engine.StopRemoteMicrophoneOutput);
@@ -756,6 +783,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _phoneMicrophoneRouteGate.Release();
         }
     }
+
+    private long BeginPhoneMicrophoneRouteIntent() =>
+        Interlocked.Increment(ref _phoneMicrophoneRouteIntentRevision);
+
+    private bool IsCurrentPhoneMicrophoneRouteIntent(long intentRevision) =>
+        intentRevision == Interlocked.Read(ref _phoneMicrophoneRouteIntentRevision);
 
     public async Task<string?> TogglePhonePlaybackAsync()
     {
@@ -1494,9 +1527,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             var shouldStopRoute = !device.UseAsMicrophone
                                   && (device.MicrophoneStreaming
                                       || !PhoneDevices.Any(item => item.UseAsMicrophone));
+            var routeIntent = BeginPhoneMicrophoneRouteIntent();
             var error = await SetPhoneMicrophoneRouteAsync(
                 device,
-                device.UseAsMicrophone && !shouldStopRoute);
+                device.UseAsMicrophone && !shouldStopRoute,
+                routeIntent);
             if (error is not null)
             {
                 SetPhoneMicrophoneSelection(null);
@@ -1562,9 +1597,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         SetPhoneMicrophoneSelection(args.Enabled ? device : null);
+        var routeIntent = BeginPhoneMicrophoneRouteIntent();
         var error = await SetPhoneMicrophoneRouteAsync(
             device,
-            args.Enabled);
+            args.Enabled,
+            routeIntent);
         if (error is null)
         {
             return;
@@ -1589,7 +1626,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (device is not null && (device.UseAsMicrophone || device.MicrophoneStreaming))
         {
             SetPhoneMicrophoneSelection(null);
-            await SetPhoneMicrophoneRouteAsync(device, false);
+            var routeIntent = BeginPhoneMicrophoneRouteIntent();
+            await SetPhoneMicrophoneRouteAsync(device, false, routeIntent);
         }
         NoticeMessage = $"{args.DeviceName} 麦克风启动失败：{args.Message}";
     }
@@ -1597,20 +1635,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void Phone_MicrophoneStreamingChanged(object? sender, bool enabled) => Dispatch(() =>
     {
         IsPhoneMicrophoneStreaming = enabled;
-        if (!enabled && IsPhoneMicrophoneRouting && !IsPhoneMicrophoneRouteBusy)
-        {
-            // 手机因权限、系统回收或网络异常主动停止时，只收尾本地输出，不再反向发送停止命令。
-            SetPhoneMicrophoneSelection(null);
-            _ = StopPhoneMicrophoneRouteAfterRemoteStateAsync();
-        }
     });
-
-    private async Task StopPhoneMicrophoneRouteAfterRemoteStateAsync()
-    {
-        await Task.Run(_engine.StopRemoteMicrophoneOutput);
-        IsPhoneMicrophoneRouting = false;
-        AddActivity("手机麦克风已停止，本地输出端点已释放");
-    }
 
     private void Phone_MicrophoneLevelChanged(object? sender, double levelDbfs) => Dispatch(() =>
     {
