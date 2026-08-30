@@ -1583,6 +1583,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         object? sender,
         PhoneMicrophoneRequestEventArgs args) => Dispatch(() =>
     {
+        AddActivity($"收到 {args.DeviceName} 的手机麦克风{(args.Enabled ? "启用" : "停止")}请求");
         _ = ApplyPhoneMicrophoneRequestAsync(args);
     });
 
@@ -1592,6 +1593,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
         if (device is null)
         {
+            // 请求可能先于 DevicesChanged 进入 UI 队列，先用服务端快照补齐设备列表，
+            // 避免手机刚连上时的第一次启停请求被误判为未知设备。
+            SyncPhoneDevices(_phone.ConnectedDevices);
+            device = PhoneDevices.FirstOrDefault(item =>
+                string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+        }
+        if (device is null)
+        {
+            AddActivity($"未找到请求设备 {args.DeviceId}，已拒绝手机麦克风请求");
             await _phone.SetMicrophoneEnabledAsync(args.DeviceId, false);
             return;
         }

@@ -401,6 +401,16 @@ public sealed class PhonePairingService : IDisposable
                 {
                     return true;
                 }
+                // 在发送控制帧前记录期望状态。手机回传类型 2 时，只有匹配该状态
+                // 才是控制确认；不匹配或没有待确认命令则视为手机主动切换。
+                lock (_sessionsLock)
+                {
+                    if (IsCurrentSessionLocked(session))
+                    {
+                        session.MicrophoneCommandPending = true;
+                        session.MicrophoneCommandExpectedEnabled = enabled;
+                    }
+                }
                 if (session.Protocol >= 2)
                 {
                     await SendBinaryFrameAsync(
@@ -432,6 +442,13 @@ public sealed class PhonePairingService : IDisposable
                                           or ObjectDisposedException
                                           or OperationCanceledException)
         {
+            lock (_sessionsLock)
+            {
+                if (IsCurrentSessionLocked(session))
+                {
+                    session.MicrophoneCommandPending = false;
+                }
+            }
             StatusChanged?.Invoke(this, $"向 {session.Name} 发送麦克风命令失败：{exception.Message}");
             return false;
         }
@@ -580,7 +597,8 @@ public sealed class PhonePairingService : IDisposable
                     (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty,
                     out var deviceId,
                     out var deviceName,
-                    out var protocol))
+                    out var protocol,
+                    out var microphoneRequests))
             {
                 await SendUncoordinatedJsonLineAsync(
                     new { type = "error", message = "移动设备配对凭据不匹配" },
@@ -594,6 +612,7 @@ public sealed class PhonePairingService : IDisposable
                 deviceName,
                 (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty,
                 protocol,
+                microphoneRequests,
                 client,
                 CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token));
             await SendJsonLineAsync(
@@ -708,11 +727,13 @@ public sealed class PhonePairingService : IDisposable
         string remoteAddress,
         out string deviceId,
         out string deviceName,
-        out int negotiatedProtocol)
+        out int negotiatedProtocol,
+        out bool microphoneRequests)
     {
         deviceId = string.Empty;
         deviceName = string.Empty;
         negotiatedProtocol = 1;
+        microphoneRequests = false;
         try
         {
             using var document = JsonDocument.Parse(handshake);
@@ -733,6 +754,9 @@ public sealed class PhonePairingService : IDisposable
             }
 
             negotiatedProtocol = protocolValue;
+            microphoneRequests = protocolValue >= 2
+                                 && root.TryGetProperty("microphoneRequests", out var requestCapability)
+                                 && requestCapability.ValueKind == JsonValueKind.True;
             deviceName = root.TryGetProperty("deviceName", out var name)
                 ? name.GetString() ?? string.Empty
                 : string.Empty;
@@ -920,6 +944,7 @@ public sealed class PhonePairingService : IDisposable
     {
         bool changed;
         bool acceptedEnabled;
+        bool routeRequest;
         lock (_sessionsLock)
         {
             if (!IsCurrentSessionLocked(session))
@@ -927,6 +952,17 @@ public sealed class PhonePairingService : IDisposable
                 return;
             }
             var wasActiveSession = IsActiveMicrophoneSessionLocked(session);
+            var wasReportedActive = session.MicrophoneReportedActive;
+            var commandPending = session.MicrophoneCommandPending;
+            var commandAcknowledged = commandPending
+                                      && session.MicrophoneCommandExpectedEnabled == enabled;
+            // 类型 2 是实际采集状态。为了兼容旧版 Android（没有类型 7 请求帧），
+            // 状态发生变化且并非 Windows 命令确认时，补发一个路由请求事件。
+            routeRequest = !session.SupportsMicrophoneRequests
+                           && !commandAcknowledged
+                           && enabled != wasReportedActive
+                           && (enabled || wasActiveSession);
+            session.MicrophoneCommandPending = false;
             session.MicrophoneReportedActive = enabled;
             acceptedEnabled = enabled && IsActiveMicrophoneSessionLocked(session);
             changed = session.MicrophoneStreaming != acceptedEnabled;
@@ -939,6 +975,31 @@ public sealed class PhonePairingService : IDisposable
             {
                 _activeMicrophoneDeviceId = null;
                 Interlocked.Increment(ref _microphoneSelectionRevision);
+            }
+        }
+        if (routeRequest)
+        {
+            var handler = MicrophoneRouteRequested;
+            if (handler is not null)
+            {
+                StatusChanged?.Invoke(
+                    this,
+                    $"{session.Name} 通过状态回报请求{(enabled ? "启用" : "停止")}手机麦克风路由。");
+                handler.Invoke(
+                    this,
+                    new PhoneMicrophoneRequestEventArgs(session.Id, session.Name, enabled));
+            }
+            else if (enabled)
+            {
+                lock (_sessionsLock)
+                {
+                    if (IsCurrentSessionLocked(session)
+                        && !IsActiveMicrophoneSessionLocked(session))
+                    {
+                        session.MicrophoneReportedActive = false;
+                    }
+                }
+                _ = SendMicrophoneCommandAsync(session, false);
             }
         }
         if (!changed)
@@ -1403,6 +1464,7 @@ public sealed class PhonePairingService : IDisposable
         string name,
         string remoteAddress,
         int protocol,
+        bool supportsMicrophoneRequests,
         TcpClient client,
         CancellationTokenSource cancellation)
     {
@@ -1415,6 +1477,8 @@ public sealed class PhonePairingService : IDisposable
         public string RemoteAddress { get; } = remoteAddress;
 
         public int Protocol { get; } = protocol;
+
+        public bool SupportsMicrophoneRequests { get; } = supportsMicrophoneRequests;
 
         public TcpClient Client { get; } = client;
 
@@ -1429,6 +1493,10 @@ public sealed class PhonePairingService : IDisposable
         public SemaphoreSlim PlaybackCommandGate { get; } = new(1, 1);
 
         public long MicrophoneCommandRevision;
+
+        public bool MicrophoneCommandPending { get; set; }
+
+        public bool MicrophoneCommandExpectedEnabled { get; set; }
 
         public long PlaybackCommandRevision;
 

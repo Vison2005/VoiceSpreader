@@ -91,6 +91,7 @@ var protocol2Hello = JsonSerializer.SerializeToUtf8Bytes(new
     secret = payloadParts[4],
     deviceId = "phone-1",
     deviceName = "WinUI protocol 2 phone",
+    microphoneRequests = true,
 });
 await protocol2Stream.WriteAsync(protocol2Hello);
 await protocol2Stream.WriteAsync("\n"u8.ToArray());
@@ -201,6 +202,7 @@ var tabletHello = JsonSerializer.SerializeToUtf8Bytes(new
     secret = payloadParts[4],
     deviceId = "tablet-1",
     deviceName = "WinUI protocol 2 tablet",
+    microphoneRequests = true,
 });
 await tabletStream.WriteAsync(tabletHello);
 await tabletStream.WriteAsync("\n"u8.ToArray());
