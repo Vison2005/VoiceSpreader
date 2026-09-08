@@ -8,8 +8,8 @@ namespace VoiceSpreader.App.Services;
 public static class AutoStartService
 {
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string ValueName = "VoiceSpreader";
-    private const string StartupTaskId = "VoiceSpreaderStartup";
+    private const string ValueName = "SoundSpreader";
+    private const string StartupTaskId = "SoundSpreaderStartup";
 
     public static bool IsEnabled => IsLegacyRegistryEnabled();
 

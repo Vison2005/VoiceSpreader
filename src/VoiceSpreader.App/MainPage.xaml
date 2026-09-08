@@ -55,6 +55,7 @@
                         <SelectorBar
                             x:Name="WorkspaceSelector"
                             Margin="0,8,0,0"
+                            Visibility="Collapsed"
                             SelectionChanged="WorkspaceSelector_SelectionChanged">
                             <SelectorBarItem Text="同步控制" />
                             <SelectorBarItem Text="设备互联" />
@@ -73,6 +74,8 @@
                             IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                         <Button
                             AutomationProperties.Name="连接移动设备"
+                            x:Name="PhoneInteropButton"
+                            Visibility="Collapsed"
                             Style="{StaticResource VoiceIconButtonStyle}">
                             <SymbolIcon Symbol="Phone" />
                             <Button.Flyout>
@@ -1227,7 +1230,7 @@
                                     <TextBlock
                                         FontSize="12"
                                         Foreground="{ThemeResource VoiceSubtleTextBrush}"
-                                        Text="v1.2.4.72 修复开机自启动，并继续提供跟随应用主题的全屏触摸板：移动光标、单击、双指滚动和低灵敏度捏合缩放。"
+                                        Text="SoundSpreader v1.3.0：多设备音频同步与蓝牙 A2DP 音频接收。"
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                                 <TextBlock
@@ -1235,7 +1238,7 @@
                                     HorizontalAlignment="Right"
                                     FontSize="12"
                                     Foreground="{ThemeResource VoiceMutedTextBrush}"
-                                        Text="v1.2.4.72" />
+                                        Text="v1.3.0" />
                             </Grid>
                             <TextBlock
                                 Grid.Row="1"

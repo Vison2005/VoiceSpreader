@@ -40,7 +40,6 @@ public sealed partial class MainPage : Page
 
         _loaded = true;
         await ViewModel.RefreshDevicesAsync();
-        await UpdatePhoneQrCodeAsync();
     }
 
     private void Page_Unloaded(object sender, RoutedEventArgs args) => ViewModel.Dispose();

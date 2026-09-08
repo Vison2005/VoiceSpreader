@@ -39,7 +39,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Native dependency deployment failed with exit code: $LASTEXITCODE"
 }
 
-$executable = Join-Path $outputDir 'VoiceSpreader.exe'
+$executable = Join-Path $outputDir 'SoundSpreader.exe'
 Write-Host ''
 Write-Host 'WinUI build succeeded.' -ForegroundColor Green
 Write-Host "EXE: $executable"

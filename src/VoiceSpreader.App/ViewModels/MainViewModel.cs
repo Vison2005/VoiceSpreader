@@ -13,6 +13,8 @@ namespace VoiceSpreader.App.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
+    // SoundSpreader 只启用 Windows 音频分发和蓝牙 A2DP 接收。
+    private static bool PhoneIntegrationEnabled => false;
     private readonly AppHost _host;
     private readonly NativeAudioEngineBridge _engine;
     private readonly BluetoothAudioReceiverService _bluetooth;
@@ -58,7 +60,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _isPhonePlaybackRouting;
     private bool _isPhonePlaybackStreaming;
     private bool _isPhonePlaybackRouteBusy;
-    private string _featureStatus = "等待手机端 v1.2.4 功能连接";
+    private string _featureStatus = "SoundSpreader v1.3.0 已启用 Windows 音频功能";
     private string _lastScanResult = string.Empty;
     private string _statusBadge = "已停止";
     private string _statusTitle = "等待配置";
@@ -137,20 +139,23 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _phone.ScanResultReceived += Phone_ScanResultReceived;
         _phone.CaptureResultReceived += Phone_CaptureResultReceived;
 
-        try
+        if (PhoneIntegrationEnabled)
         {
-            _phone.Start();
-            ReplaceCollection(PhoneAddresses, _phone.LocalAddresses);
-            var savedAddress = host.Settings.PhonePairingAddress;
-            _selectedPhoneAddress = !string.IsNullOrWhiteSpace(savedAddress)
-                                    && _phone.SetLocalAddress(savedAddress)
-                ? savedAddress
-                : _phone.LocalAddress;
-            _ = RequestSavedPhoneReconnectsAsync();
-        }
-        catch (Exception exception) when (exception is SocketException or InvalidOperationException)
-        {
-            NoticeMessage = $"手机配对服务启动失败：{exception.Message}";
+            try
+            {
+                _phone.Start();
+                ReplaceCollection(PhoneAddresses, _phone.LocalAddresses);
+                var savedAddress = host.Settings.PhonePairingAddress;
+                _selectedPhoneAddress = !string.IsNullOrWhiteSpace(savedAddress)
+                                        && _phone.SetLocalAddress(savedAddress)
+                    ? savedAddress
+                    : _phone.LocalAddress;
+                _ = RequestSavedPhoneReconnectsAsync();
+            }
+            catch (Exception exception) when (exception is SocketException or InvalidOperationException)
+            {
+                NoticeMessage = $"手机配对服务启动失败：{exception.Message}";
+            }
         }
 
         if (!_engine.IsAvailable)
@@ -1184,16 +1189,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
             ReplaceCollection(CaptureSources, render.Devices);
             ReplaceCollection(Microphones, capture.Devices);
-            var virtualCableOutputs = render.Devices
-                .Where(IsVirtualCableInput)
-                .OrderBy(device => device.Name, StringComparer.CurrentCultureIgnoreCase)
-                .ToArray();
-            ReplaceCollection(PhoneMicrophoneOutputs, virtualCableOutputs);
-            SelectedPhoneMicrophoneOutput = FindById(
-                                               PhoneMicrophoneOutputs,
-                                               _host.Settings.PhoneMicrophoneOutputDeviceId)
-                                           ?? PhoneMicrophoneOutputs.FirstOrDefault();
+            // SoundSpreader 不再枚举或关联 VB-CABLE；旧互联设置仅保留用于兼容读取。
+            PhoneMicrophoneOutputs.Clear();
+            _selectedPhoneMicrophoneOutput = null;
             OnPropertyChanged(nameof(HasVirtualCable));
+            OnPropertyChanged(nameof(SelectedPhoneMicrophoneOutput));
             NotifyPhoneRouteStateChanged();
 
             SelectedCapture = FindById(CaptureSources, _host.Settings.CaptureDeviceId)

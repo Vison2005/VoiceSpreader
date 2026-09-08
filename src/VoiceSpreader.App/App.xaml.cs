@@ -79,7 +79,7 @@ public partial class App : Application
         {
             var directory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "VoiceSpreader");
+                "SoundSpreader");
             Directory.CreateDirectory(directory);
             File.WriteAllText(
                 Path.Combine(directory, "startup-error.log"),

@@ -27,7 +27,7 @@ public sealed partial class TrayIconService : IDisposable
     private const uint CommandShow = 1;
     private const uint CommandHide = 2;
     private const uint CommandExit = 3;
-    private const string WindowClassName = "VoiceSpreader.TrayMessageWindow";
+    private const string WindowClassName = "SoundSpreader.TrayMessageWindow";
 
     private static readonly ConcurrentDictionary<nint, TrayIconService> Instances = new();
     private static readonly WndProc WindowProcedure = WindowProc;
@@ -45,7 +45,7 @@ public sealed partial class TrayIconService : IDisposable
         _windowHandle = CreateWindowEx(
             0,
             WindowClassName,
-            "VoiceSpreader Tray",
+            "SoundSpreader Tray",
             0,
             0,
             0,
@@ -92,7 +92,7 @@ public sealed partial class TrayIconService : IDisposable
     public void ShowFirstMinimizeMessage()
     {
         var notification = CreateIconData(NifInfo);
-        notification.InfoTitle = "VoiceSpreader 仍在运行";
+        notification.InfoTitle = "SoundSpreader 仍在运行";
         notification.Info = "多设备同步会继续在后台运行；可从通知区域恢复窗口或退出。";
         notification.TimeoutOrVersion = 3500;
         ShellNotifyIcon(NimModify, ref notification);
@@ -106,7 +106,7 @@ public sealed partial class TrayIconService : IDisposable
         Flags = flags,
         CallbackMessage = TrayCallbackMessage,
         IconHandle = _iconHandle,
-        Tip = "VoiceSpreader",
+            Tip = "SoundSpreader",
         Info = string.Empty,
         InfoTitle = string.Empty,
     };
@@ -162,7 +162,7 @@ public sealed partial class TrayIconService : IDisposable
 
         try
         {
-            AppendMenu(menu, MfString, CommandShow, "显示 VoiceSpreader");
+        AppendMenu(menu, MfString, CommandShow, "显示 SoundSpreader");
             AppendMenu(menu, MfString, CommandHide, "最小化到托盘");
             AppendMenu(menu, MfSeparator, 0, null);
             AppendMenu(menu, MfString, CommandExit, "退出");

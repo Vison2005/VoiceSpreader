@@ -4,6 +4,8 @@ namespace VoiceSpreader.App.Services;
 
 public sealed class AppHost : IDisposable
 {
+    // SoundSpreader 仅保留 Windows 音频能力；手机互联代码保留在工程中，但不再启动。
+    private static bool PhoneIntegrationEnabled => false;
     private bool _disposed;
 
     public AppHost()
@@ -33,6 +35,11 @@ public sealed class AppHost : IDisposable
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         Settings = await SettingsStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        if (!PhoneIntegrationEnabled)
+        {
+            return;
+        }
+
         if (PhonePairing.RestoreCredentials(
                 Settings.PhonePairingSessionId,
                 Settings.PhonePairingSecret))

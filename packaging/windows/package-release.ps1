@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = '1.2.4.72',
+    [string]$Version = '1.3.0',
     [string]$Publisher = 'CN=Vison2005'
 )
 
@@ -23,8 +23,8 @@ $manifestVersion = if ($packageVersion.Revision -lt 0) {
 else {
     $packageVersion.ToString()
 }
-$packagePath = Join-Path $distRoot "VoiceSpreader-v$releaseVersion-x64.msix"
-$certificatePath = Join-Path $distRoot "VoiceSpreader-v$releaseVersion.cer"
+$packagePath = Join-Path $distRoot "SoundSpreader-v$releaseVersion-x64.msix"
+$certificatePath = Join-Path $distRoot "SoundSpreader-v$releaseVersion.cer"
 $pfxPath = Join-Path $signingRoot 'VoiceSpreader-CodeSigning.pfx'
 $passwordPath = Join-Path $signingRoot 'VoiceSpreader-CodeSigning.password'
 
@@ -98,7 +98,7 @@ if (-not (Test-Path -LiteralPath $pfxPath)) {
     $certificate = New-SelfSignedCertificate `
         -Type Custom `
         -Subject $Publisher `
-        -FriendlyName 'VoiceSpreader private release signing' `
+        -FriendlyName 'SoundSpreader private release signing' `
         -CertStoreLocation 'Cert:\CurrentUser\My' `
         -KeyAlgorithm RSA `
         -KeyLength 4096 `
@@ -173,12 +173,12 @@ $installContent = $installTemplate.Replace('{{VERSION}}', $releaseVersion)
     (Join-Path $distRoot 'WINDOWS-INSTALL.md'),
     $installContent,
     [Text.UTF8Encoding]::new($false))
-$installScriptTemplate = Get-Content (Join-Path $PSScriptRoot 'Install VoiceSpreader.cmd') -Raw -Encoding UTF8
+$installScriptTemplate = Get-Content (Join-Path $PSScriptRoot 'Install SoundSpreader.cmd') -Raw -Encoding UTF8
 $installScriptContent = $installScriptTemplate.Replace('{{VERSION}}', $releaseVersion)
 [IO.File]::WriteAllText(
-    (Join-Path $distRoot 'Install VoiceSpreader.cmd'),
+    (Join-Path $distRoot 'Install SoundSpreader.cmd'),
     $installScriptContent,
     [Text.UTF8Encoding]::new($false))
 
-Write-Host "Windows release package: $packagePath"
+Write-Host "SoundSpreader Windows release package: $packagePath"
 Write-Host "Public certificate: $certificatePath"
