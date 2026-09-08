@@ -1,0 +1,2205 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Net.Sockets;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using WinSystem = Windows.System;
+using VoiceSpreader.App.Models;
+using VoiceSpreader.App.Services;
+
+namespace VoiceSpreader.App.ViewModels;
+
+public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
+{
+    private readonly AppHost _host;
+    private readonly NativeAudioEngineBridge _engine;
+    private readonly BluetoothAudioReceiverService _bluetooth;
+    private readonly PhonePairingService _phone;
+    private readonly InputBridgeService _input;
+    private readonly ShortcutService _shortcuts;
+    private readonly DispatcherQueue _dispatcher;
+    private readonly Dictionary<string, OutputSettings> _savedOutputs;
+    private readonly Dictionary<string, PhoneDeviceSettings> _savedPhoneDevices;
+    private readonly List<ComputerShortcut> _computerShortcuts;
+    private readonly SemaphoreSlim _settingsSaveGate = new(1, 1);
+    private readonly SemaphoreSlim _phoneMicrophoneRouteGate = new(1, 1);
+    private AudioEndpoint? _selectedCapture;
+    private AudioEndpoint? _selectedMicrophone;
+    private int _bufferMilliseconds;
+    private bool _automaticLatencyCompensation;
+    private bool _continuousAcousticTracking;
+    private bool _exclusiveMode;
+    private AppThemeMode _themeMode;
+    private bool _isBusy;
+    private bool _isStarting;
+    private bool _isRunning;
+    private bool _isCalibrating;
+    private bool _isStoppingCalibration;
+    private bool _isBluetoothBusy;
+    private bool _isBluetoothConnected;
+    private bool _startWithWindows;
+    private BluetoothAudioDevice? _selectedBluetoothDevice;
+    private string _bluetoothStatus = "尚未扫描蓝牙音频设备。";
+    private bool _isPhoneConnected;
+    private bool _isPhoneMicrophoneStreaming;
+    private string _phoneName = string.Empty;
+    private string _phoneStatus = "等待手机输入配对码。";
+    private double _phoneLevelPercent;
+    private string? _selectedPhoneAddress;
+    private AudioEndpoint? _selectedPhoneMicrophoneOutput;
+    private int _phoneMicrophoneOutputVolume;
+    private bool _isPhoneMicrophoneRouting;
+    private bool _isPhoneMicrophoneRouteBusy;
+    private AudioEndpoint? _selectedPhonePlaybackSource;
+    private int _phonePlaybackVolume;
+    private bool _isPhonePlaybackRouting;
+    private bool _isPhonePlaybackStreaming;
+    private bool _isPhonePlaybackRouteBusy;
+    private string _featureStatus = "等待手机端 v1.2.4 功能连接";
+    private string _lastScanResult = string.Empty;
+    private string _statusBadge = "已停止";
+    private string _statusTitle = "等待配置";
+    private string _statusMessage = "选择一个系统声音来源和至少一个输出设备。";
+    private string _programLevelText = "节目电平 -- dBFS · 探针暂停";
+    private string? _noticeMessage;
+    private long _noticeRevision;
+    private long? _calibrationNoticeRevision;
+    private long _settingsRevision;
+    private long _phoneMicrophoneRouteIntentRevision;
+    private bool _updatingPhoneMicrophoneSelection;
+    private bool _disposed;
+
+    public MainViewModel(AppHost host, DispatcherQueue dispatcher)
+    {
+        _host = host;
+        _engine = host.AudioEngine;
+        _bluetooth = host.BluetoothAudioReceiver;
+        _phone = host.PhonePairing;
+        _input = host.InputBridge;
+        _shortcuts = host.Shortcuts;
+        _dispatcher = dispatcher;
+        _bufferMilliseconds = host.Settings.BufferMilliseconds;
+        _automaticLatencyCompensation = host.Settings.AutomaticLatencyCompensation;
+        _continuousAcousticTracking = host.Settings.ContinuousAcousticTracking;
+        _exclusiveMode = host.Settings.ExclusiveMode;
+        _themeMode = host.Settings.ThemeMode;
+        _phoneMicrophoneOutputVolume = Math.Clamp(host.Settings.PhoneMicrophoneOutputVolume, 0, 100);
+        _phonePlaybackVolume = Math.Clamp(host.Settings.PhonePlaybackVolume, 0, 100);
+        _savedOutputs = new Dictionary<string, OutputSettings>(
+            host.Settings.Outputs,
+            StringComparer.OrdinalIgnoreCase);
+        _savedPhoneDevices = new Dictionary<string, PhoneDeviceSettings>(
+            host.Settings.PhoneDevices,
+            StringComparer.OrdinalIgnoreCase);
+        _computerShortcuts = host.Settings.ComputerShortcuts
+            .Where(item => !string.IsNullOrWhiteSpace(item.Id)
+                           && !string.IsNullOrWhiteSpace(item.Name))
+            .Take(24)
+            .ToList();
+        foreach (var shortcut in _computerShortcuts)
+        {
+            ComputerShortcuts.Add(shortcut);
+        }
+        _phone.ComputerShortcutsProvider = () => _computerShortcuts;
+        RefreshSavedPhoneDevices();
+        _startWithWindows = AutoStartService.IsEnabled;
+
+        _engine.StatusChanged += Engine_StatusChanged;
+        _engine.ErrorOccurred += Engine_ErrorOccurred;
+        _engine.RunningChanged += Engine_RunningChanged;
+        _engine.ProgramLevelChanged += Engine_ProgramLevelChanged;
+        _engine.CalibrationCompleted += Engine_CalibrationCompleted;
+        _engine.AcousticCorrectionChanged += Engine_AcousticCorrectionChanged;
+        _bluetooth.StatusChanged += Bluetooth_StatusChanged;
+        _bluetooth.ErrorOccurred += Bluetooth_ErrorOccurred;
+        _bluetooth.BusyChanged += Bluetooth_BusyChanged;
+        _bluetooth.ConnectionChanged += Bluetooth_ConnectionChanged;
+        _phone.StatusChanged += Phone_StatusChanged;
+        _phone.ConnectionChanged += Phone_ConnectionChanged;
+        _phone.DevicesChanged += Phone_DevicesChanged;
+        _phone.MicrophoneRouteRequested += Phone_MicrophoneRouteRequested;
+        _phone.MicrophoneControlFailed += Phone_MicrophoneControlFailed;
+        _phone.MicrophoneStreamingChanged += Phone_MicrophoneStreamingChanged;
+        _phone.MicrophoneLevelChanged += Phone_MicrophoneLevelChanged;
+        _phone.PlaybackStreamingChanged += Phone_PlaybackStreamingChanged;
+        _phone.InputPointerReceived += Phone_InputPointerReceived;
+        _phone.InputButtonReceived += Phone_InputButtonReceived;
+        _phone.InputScrollReceived += Phone_InputScrollReceived;
+        _phone.ShortcutReceived += Phone_ShortcutReceived;
+        _phone.FileOfferReceived += Phone_FileOfferReceived;
+        _phone.FileCompleteReceived += Phone_FileCompleteReceived;
+        _phone.ScanResultReceived += Phone_ScanResultReceived;
+        _phone.CaptureResultReceived += Phone_CaptureResultReceived;
+
+        try
+        {
+            _phone.Start();
+            ReplaceCollection(PhoneAddresses, _phone.LocalAddresses);
+            var savedAddress = host.Settings.PhonePairingAddress;
+            _selectedPhoneAddress = !string.IsNullOrWhiteSpace(savedAddress)
+                                    && _phone.SetLocalAddress(savedAddress)
+                ? savedAddress
+                : _phone.LocalAddress;
+            _ = RequestSavedPhoneReconnectsAsync();
+        }
+        catch (Exception exception) when (exception is SocketException or InvalidOperationException)
+        {
+            NoticeMessage = $"手机配对服务启动失败：{exception.Message}";
+        }
+
+        if (!_engine.IsAvailable)
+        {
+            NoticeMessage = _engine.AvailabilityError;
+        }
+    }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public ObservableCollection<AudioEndpoint> CaptureSources { get; } = [];
+
+    public ObservableCollection<AudioEndpoint> Microphones { get; } = [];
+
+    public ObservableCollection<OutputEndpointItem> Outputs { get; } = [];
+
+    public ObservableCollection<OutputEndpointItem> SelectedOutputs { get; } = [];
+
+    public ObservableCollection<string> Activity { get; } = [];
+
+    public ObservableCollection<BluetoothAudioDevice> BluetoothDevices { get; } = [];
+
+    public ObservableCollection<string> PhoneAddresses { get; } = [];
+
+    public ObservableCollection<AudioEndpoint> PhoneMicrophoneOutputs { get; } = [];
+
+    public ObservableCollection<PhoneDeviceItem> PhoneDevices { get; } = [];
+
+    public ObservableCollection<SavedPhoneDevice> SavedPhoneDevices { get; } = [];
+
+    public ObservableCollection<ComputerShortcut> ComputerShortcuts { get; } = [];
+
+    public bool HasSavedPhoneDevices => SavedPhoneDevices.Count > 0;
+
+    public bool HasComputerShortcuts => ComputerShortcuts.Count > 0;
+
+    public string ComputerShortcutsText => ComputerShortcuts.Count == 0
+        ? "尚未配置；点击添加应用后，手机触摸板会出现对应入口。"
+        : string.Join("、", ComputerShortcuts.Select(item => item.Name));
+
+    public bool IsEngineAvailable => _engine.IsAvailable;
+
+    public AudioEndpoint? SelectedCapture
+    {
+        get => _selectedCapture;
+        set
+        {
+            if (SetField(ref _selectedCapture, value))
+            {
+                RebuildOutputs();
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public AudioEndpoint? SelectedMicrophone
+    {
+        get => _selectedMicrophone;
+        set
+        {
+            if (SetField(ref _selectedMicrophone, value))
+            {
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public int BufferMilliseconds
+    {
+        get => _bufferMilliseconds;
+        set
+        {
+            if (SetField(ref _bufferMilliseconds, Math.Clamp(value, 2, 100)))
+            {
+                if (_engine.IsActive)
+                {
+                    _engine.SetSynchronizationMargin(_bufferMilliseconds);
+                }
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public bool AutomaticLatencyCompensation
+    {
+        get => _automaticLatencyCompensation;
+        set
+        {
+            if (SetField(ref _automaticLatencyCompensation, value))
+            {
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public bool ContinuousAcousticTracking
+    {
+        get => _continuousAcousticTracking;
+        set
+        {
+            if (SetField(ref _continuousAcousticTracking, value))
+            {
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public bool ExclusiveMode
+    {
+        get => _exclusiveMode;
+        set
+        {
+            if (SetField(ref _exclusiveMode, value))
+            {
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public AppThemeMode ThemeMode
+    {
+        get => _themeMode;
+        set
+        {
+            if (SetField(ref _themeMode, value))
+            {
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set => SetField(ref _isBusy, value);
+    }
+
+    public bool IsRunning
+    {
+        get => _isRunning;
+        private set
+        {
+            if (SetField(ref _isRunning, value))
+            {
+                OnPropertyChanged(nameof(StartButtonText));
+                OnPropertyChanged(nameof(ControlsEnabled));
+                OnPropertyChanged(nameof(CanCalibrate));
+                UpdateOutputControlStates();
+            }
+        }
+    }
+
+    public bool IsCalibrating
+    {
+        get => _isCalibrating;
+        private set
+        {
+            if (SetField(ref _isCalibrating, value))
+            {
+                OnPropertyChanged(nameof(CalibrationButtonText));
+                OnPropertyChanged(nameof(ControlsEnabled));
+                OnPropertyChanged(nameof(AdjustmentsEnabled));
+                OnPropertyChanged(nameof(CanControlSynchronization));
+                OnPropertyChanged(nameof(CanCalibrate));
+                UpdateOutputControlStates();
+            }
+        }
+    }
+
+    public bool IsStoppingCalibration
+    {
+        get => _isStoppingCalibration;
+        private set
+        {
+            if (SetField(ref _isStoppingCalibration, value))
+            {
+                OnPropertyChanged(nameof(CalibrationButtonText));
+                OnPropertyChanged(nameof(CanCalibrate));
+                OnPropertyChanged(nameof(CanControlSynchronization));
+            }
+        }
+    }
+
+    public bool ControlsEnabled => !IsRunning && !_isStarting && !IsCalibrating;
+
+    public bool AdjustmentsEnabled => !IsCalibrating;
+
+    public string StartButtonText => IsRunning || _isStarting ? "停止同步" : "开始同步";
+
+    public string CalibrationButtonText => IsStoppingCalibration
+        ? "正在停止..."
+        : IsCalibrating ? "停止校准" : "自动校准";
+
+    public bool CanCalibrate => IsEngineAvailable
+                                && !IsStoppingCalibration
+                                && (IsCalibrating || (!IsRunning && !_isStarting));
+
+    public bool CanControlSynchronization => IsEngineAvailable
+                                             && !IsCalibrating
+                                             && !IsStoppingCalibration;
+
+    public string StatusBadge
+    {
+        get => _statusBadge;
+        private set => SetField(ref _statusBadge, value);
+    }
+
+    public string StatusTitle
+    {
+        get => _statusTitle;
+        private set => SetField(ref _statusTitle, value);
+    }
+
+    public string StatusMessage
+    {
+        get => _statusMessage;
+        private set => SetField(ref _statusMessage, value);
+    }
+
+    public string ProgramLevelText
+    {
+        get => _programLevelText;
+        private set => SetField(ref _programLevelText, value);
+    }
+
+    public string? NoticeMessage
+    {
+        get => _noticeMessage;
+        private set
+        {
+            if (SetField(ref _noticeMessage, value))
+            {
+                _noticeRevision++;
+                OnPropertyChanged(nameof(HasNotice));
+            }
+        }
+    }
+
+    public bool HasNotice => !string.IsNullOrWhiteSpace(NoticeMessage);
+
+    public BluetoothAudioDevice? SelectedBluetoothDevice
+    {
+        get => _selectedBluetoothDevice;
+        set => SetField(ref _selectedBluetoothDevice, value);
+    }
+
+    public bool IsBluetoothBusy
+    {
+        get => _isBluetoothBusy;
+        private set
+        {
+            if (SetField(ref _isBluetoothBusy, value))
+            {
+                OnPropertyChanged(nameof(IsBluetoothIdle));
+            }
+        }
+    }
+
+    public bool IsBluetoothIdle => !IsBluetoothBusy;
+
+    public bool IsBluetoothConnected
+    {
+        get => _isBluetoothConnected;
+        private set
+        {
+            if (SetField(ref _isBluetoothConnected, value))
+            {
+                OnPropertyChanged(nameof(BluetoothActionText));
+            }
+        }
+    }
+
+    public string BluetoothActionText => IsBluetoothConnected ? "断开连接" : "连接并接收声音";
+
+    public string BluetoothStatus
+    {
+        get => _bluetoothStatus;
+        private set => SetField(ref _bluetoothStatus, value);
+    }
+
+    public bool IsPhoneConnected
+    {
+        get => _isPhoneConnected;
+        private set
+        {
+            if (SetField(ref _isPhoneConnected, value))
+            {
+                OnPropertyChanged(nameof(PhoneConnectionText));
+                OnPropertyChanged(nameof(PhoneDeviceEmptyStateVisibility));
+                NotifyPhoneRouteStateChanged();
+                NotifyPhonePlaybackStateChanged();
+            }
+        }
+    }
+
+    public bool IsPhoneMicrophoneStreaming
+    {
+        get => _isPhoneMicrophoneStreaming;
+        private set
+        {
+            if (SetField(ref _isPhoneMicrophoneStreaming, value))
+            {
+                NotifyPhoneRouteStateChanged();
+            }
+        }
+    }
+
+    public int ConnectedPhoneDeviceCount => PhoneDevices.Count;
+
+    public Visibility PhoneDeviceEmptyStateVisibility =>
+        IsPhoneConnected ? Visibility.Collapsed : Visibility.Visible;
+
+    public int SelectedPhoneMicrophoneCount =>
+        PhoneDevices.Count(device => device.UseAsMicrophone);
+
+    public int SelectedPhoneSpeakerCount =>
+        PhoneDevices.Count(device => device.UseAsSpeaker && device.SupportsPlayback);
+
+    public string ConnectedPhoneDeviceCountText => ConnectedPhoneDeviceCount switch
+    {
+        0 => "0 台设备",
+        1 => "1 台设备在线",
+        _ => $"{ConnectedPhoneDeviceCount} 台设备在线",
+    };
+
+    public string PhoneRouteSelectionText =>
+        $"麦克风 {SelectedPhoneMicrophoneCount} · 扬声器 {SelectedPhoneSpeakerCount}";
+
+    public string PhoneConnectionText => IsPhoneConnected
+        ? ConnectedPhoneDeviceCount == 1 ? $"已连接：{_phoneName}" : $"已连接：{ConnectedPhoneDeviceCount} 台设备"
+        : "等待设备连接";
+
+    public string PhonePairingCode => _phone.PairingCode;
+
+    public string PhonePairingPayload => _phone.PairingPayload;
+
+    public string PhoneStatus
+    {
+        get => _phoneStatus;
+        private set => SetField(ref _phoneStatus, value);
+    }
+
+    /// <summary>
+    /// 手机触摸板、快捷键、扫码和文件传输的聚合状态，供设备互联页面使用。
+    /// </summary>
+    public string FeatureStatus
+    {
+        get => _featureStatus;
+        private set => SetField(ref _featureStatus, value);
+    }
+
+    public string LastScanResult
+    {
+        get => _lastScanResult;
+        private set => SetField(ref _lastScanResult, value);
+    }
+
+    public bool CanRequestPhoneFeatures => PhoneDevices.Count > 0;
+
+    public bool HasScanResult => !string.IsNullOrWhiteSpace(LastScanResult);
+
+    public async Task RequestPhoneScanAsync(string mode = "camera")
+    {
+        var device = PhoneDevices.FirstOrDefault();
+        if (device is null)
+        {
+            FeatureStatus = "请先连接 Android 手机";
+            return;
+        }
+
+        FeatureStatus = mode.Equals("gallery", StringComparison.OrdinalIgnoreCase)
+            ? "正在请求手机从相册选择二维码…"
+            : "正在请求手机打开扫码器…";
+        if (!await _phone.RequestScanAsync(device.Id, mode))
+        {
+        FeatureStatus = "手机未接受扫码请求，请确认应用已升级到 v1.2.4.1";
+        }
+    }
+
+    public async Task RequestPhoneCaptureAsync()
+    {
+        var device = PhoneDevices.FirstOrDefault();
+        if (device is null)
+        {
+            FeatureStatus = "请先连接 Android 手机";
+            return;
+        }
+
+        FeatureStatus = "正在请求手机拍摄照片并传回电脑…";
+        if (!await _phone.RequestCaptureAsync(device.Id))
+        {
+        FeatureStatus = "手机未接受拍照请求，请确认应用已升级到 v1.2.4.1";
+        }
+    }
+
+    public void ShowFeatureStatus(string status)
+    {
+        FeatureStatus = status;
+        AddActivity(status);
+    }
+
+    public async Task<string?> AddComputerShortcutAsync(string executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath)
+            || !Path.IsPathFullyQualified(executablePath)
+            || !File.Exists(executablePath))
+        {
+            return "请选择仍然存在的 Windows 可执行文件。";
+        }
+
+        var normalizedPath = Path.GetFullPath(executablePath);
+        if (_computerShortcuts.Any(item => string.Equals(
+                Path.GetFullPath(item.ExecutablePath),
+                normalizedPath,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return "这个应用已经添加。";
+        }
+
+        var name = Path.GetFileNameWithoutExtension(normalizedPath);
+        var shortcut = new ComputerShortcut(Guid.NewGuid().ToString("N"), name, normalizedPath);
+        _computerShortcuts.Add(shortcut);
+        ComputerShortcuts.Add(shortcut);
+        OnPropertyChanged(nameof(HasComputerShortcuts));
+        OnPropertyChanged(nameof(ComputerShortcutsText));
+        await SaveComputerShortcutsAsync();
+        _phone.BroadcastComputerShortcuts(_computerShortcuts);
+        FeatureStatus = $"已添加电脑应用：{name}；手机端可直接启动。";
+        return null;
+    }
+
+    public async Task RemoveComputerShortcutAsync(ComputerShortcut shortcut)
+    {
+        if (_computerShortcuts.RemoveAll(item => string.Equals(item.Id, shortcut.Id, StringComparison.OrdinalIgnoreCase)) > 0)
+        {
+            ComputerShortcuts.Remove(shortcut);
+            OnPropertyChanged(nameof(HasComputerShortcuts));
+            OnPropertyChanged(nameof(ComputerShortcutsText));
+            await SaveComputerShortcutsAsync();
+            _phone.BroadcastComputerShortcuts(_computerShortcuts);
+        }
+    }
+
+    private async Task SaveComputerShortcutsAsync()
+    {
+        var settings = _host.Settings with
+        {
+            ComputerShortcuts = _computerShortcuts.ToList(),
+        };
+        await _host.SaveSettingsAsync(settings);
+    }
+
+    public double PhoneLevelPercent
+    {
+        get => _phoneLevelPercent;
+        private set => SetField(ref _phoneLevelPercent, value);
+    }
+
+    public AudioEndpoint? SelectedPhoneMicrophoneOutput
+    {
+        get => _selectedPhoneMicrophoneOutput;
+        set
+        {
+            if (SetField(ref _selectedPhoneMicrophoneOutput, value))
+            {
+                NotifyPhoneRouteStateChanged();
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public int PhoneMicrophoneOutputVolume
+    {
+        get => _phoneMicrophoneOutputVolume;
+        set
+        {
+            if (SetField(ref _phoneMicrophoneOutputVolume, Math.Clamp(value, 0, 100)))
+            {
+                if (IsPhoneMicrophoneRouting)
+                {
+                    _engine.SetRemoteMicrophoneOutputVolume(_phoneMicrophoneOutputVolume);
+                }
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public bool IsPhoneMicrophoneRouting
+    {
+        get => _isPhoneMicrophoneRouting;
+        private set
+        {
+            if (SetField(ref _isPhoneMicrophoneRouting, value))
+            {
+                NotifyPhoneRouteStateChanged();
+            }
+        }
+    }
+
+    public bool IsPhoneMicrophoneRouteBusy
+    {
+        get => _isPhoneMicrophoneRouteBusy;
+        private set
+        {
+            if (SetField(ref _isPhoneMicrophoneRouteBusy, value))
+            {
+                NotifyPhoneRouteStateChanged();
+            }
+        }
+    }
+
+    public bool HasVirtualCable => PhoneMicrophoneOutputs.Count > 0;
+
+    public bool CanTogglePhoneMicrophoneRoute => !IsPhoneMicrophoneRouteBusy
+                                                  && (IsPhoneMicrophoneRouting
+                                                  || (IsEngineAvailable
+                                                      && SelectedPhoneMicrophoneCount > 0
+                                                      && SelectedPhoneMicrophoneOutput is not null));
+
+    public string PhoneMicrophoneRouteActionText =>
+        IsPhoneMicrophoneRouteBusy
+            ? "正在切换…"
+            : IsPhoneMicrophoneRouting ? "停止输出" : "输出到 Windows 应用";
+
+    public string PhoneMicrophoneRouteBadge => IsPhoneMicrophoneRouting
+        ? IsPhoneMicrophoneStreaming ? "传输中" : "等待音频"
+        : HasVirtualCable ? "已就绪" : "需要安装";
+
+    public string PhoneMicrophoneRouteStatus
+    {
+        get
+        {
+            if (!HasVirtualCable)
+            {
+                return "未检测到 VB-CABLE。安装后刷新设备即可使用。";
+            }
+            if (SelectedPhoneMicrophoneCount == 0)
+            {
+                return "请选择一台在线设备作为电脑麦克风。";
+            }
+            if (IsPhoneMicrophoneRouting && IsPhoneMicrophoneStreaming)
+            {
+                var device = PhoneDevices.First(item => item.UseAsMicrophone);
+                return $"正在接收 {device.Name} 并输出到 {SelectedPhoneMicrophoneOutput?.Name}。";
+            }
+            if (IsPhoneMicrophoneRouting)
+            {
+                return "输出端点已经打开，正在等待手机开始回传麦克风。";
+            }
+            return "设备已就绪；校准麦克风统一在同步控制中选择 CABLE Output。";
+        }
+    }
+
+    public AudioEndpoint? SelectedPhonePlaybackSource
+    {
+        get => _selectedPhonePlaybackSource;
+        set
+        {
+            if (SetField(ref _selectedPhonePlaybackSource, value))
+            {
+                NotifyPhonePlaybackStateChanged();
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public int PhonePlaybackVolume
+    {
+        get => _phonePlaybackVolume;
+        set
+        {
+            if (SetField(ref _phonePlaybackVolume, Math.Clamp(value, 0, 100)))
+            {
+                if (IsPhonePlaybackRouting)
+                {
+                    _engine.SetSystemAudioCaptureVolume(_phonePlaybackVolume);
+                }
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public bool IsPhonePlaybackRouting
+    {
+        get => _isPhonePlaybackRouting;
+        private set
+        {
+            if (SetField(ref _isPhonePlaybackRouting, value))
+            {
+                NotifyPhonePlaybackStateChanged();
+            }
+        }
+    }
+
+    public bool IsPhonePlaybackStreaming
+    {
+        get => _isPhonePlaybackStreaming;
+        private set
+        {
+            if (SetField(ref _isPhonePlaybackStreaming, value))
+            {
+                NotifyPhonePlaybackStateChanged();
+            }
+        }
+    }
+
+    public bool IsPhonePlaybackRouteBusy
+    {
+        get => _isPhonePlaybackRouteBusy;
+        private set
+        {
+            if (SetField(ref _isPhonePlaybackRouteBusy, value))
+            {
+                NotifyPhonePlaybackStateChanged();
+            }
+        }
+    }
+
+    public bool CanTogglePhonePlayback => !IsPhonePlaybackRouteBusy
+                                           && (IsPhonePlaybackRouting
+                                           || (IsEngineAvailable
+                                               && SelectedPhoneSpeakerCount > 0
+                                               && SelectedPhonePlaybackSource is not null));
+
+    public bool PhonePlaybackSourceEnabled => !IsPhonePlaybackRouting && !IsPhonePlaybackRouteBusy;
+
+    public string PhonePlaybackActionText =>
+        IsPhonePlaybackRouteBusy
+            ? "正在切换…"
+            : IsPhonePlaybackRouting ? "停止手机播放" : "在手机上播放";
+
+    public string PhonePlaybackBadge => IsPhonePlaybackRouting
+        ? IsPhonePlaybackStreaming ? "播放中" : "等待声音"
+        : !IsPhoneConnected ? "等待连接"
+        : SelectedPhoneSpeakerCount == 0 ? "未选择设备" : "已就绪";
+
+    public string PhonePlaybackStatus
+    {
+        get
+        {
+            if (!IsPhoneConnected)
+            {
+                return "连接 Android 手机后即可建立独立播放链路。";
+            }
+            if (SelectedPhoneSpeakerCount == 0)
+            {
+                return "请选择至少一台支持播放的在线设备。";
+            }
+            if (IsPhonePlaybackRouting && IsPhonePlaybackStreaming)
+            {
+                return $"正在从 {SelectedPhonePlaybackSource?.Name} 向 {SelectedPhoneSpeakerCount} 台设备分发 48 kHz 音频。";
+            }
+            if (IsPhonePlaybackRouting)
+            {
+                return "链路已经建立，正在等待 Windows 产生可播放声音。";
+            }
+            return "选择 Windows 播放端点，并勾选要作为电脑扬声器的设备。";
+        }
+    }
+
+    public string? SelectedPhoneAddress
+    {
+        get => _selectedPhoneAddress;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value) || !SetField(ref _selectedPhoneAddress, value))
+            {
+                return;
+            }
+            if (_phone.SetLocalAddress(value))
+            {
+                OnPropertyChanged(nameof(PhonePairingPayload));
+                _ = SaveSettingsAsync();
+            }
+        }
+    }
+
+    public async Task<string?> TogglePhoneMicrophoneRouteAsync()
+    {
+        if (IsPhoneMicrophoneRouting || _engine.IsRemoteMicrophoneOutputActive)
+        {
+            SetPhoneMicrophoneSelection(null);
+            var stopIntent = BeginPhoneMicrophoneRouteIntent();
+            return await SetPhoneMicrophoneRouteAsync(null, false, stopIntent);
+        }
+
+        var selectedDevice = PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone);
+        var startIntent = BeginPhoneMicrophoneRouteIntent();
+        return await SetPhoneMicrophoneRouteAsync(selectedDevice, true, startIntent);
+    }
+
+    private async Task<string?> SetPhoneMicrophoneRouteAsync(
+        PhoneDeviceItem? selectedDevice,
+        bool enabled,
+        long intentRevision,
+        bool microphoneCommandAlreadyApplied = false)
+    {
+        await _phoneMicrophoneRouteGate.WaitAsync();
+        if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+        {
+            _phoneMicrophoneRouteGate.Release();
+            return null;
+        }
+        IsPhoneMicrophoneRouteBusy = true;
+        try
+        {
+            if (!enabled)
+            {
+                if (!microphoneCommandAlreadyApplied && selectedDevice is not null)
+                {
+                    await _phone.SetMicrophoneEnabledAsync(selectedDevice.Id, false);
+                }
+                else if (!microphoneCommandAlreadyApplied)
+                {
+                    await _phone.SetMicrophoneEnabledAsync(false);
+                }
+                if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+                {
+                    return null;
+                }
+                await Task.Run(_engine.StopRemoteMicrophoneOutput);
+                IsPhoneMicrophoneRouting = false;
+                AddActivity("已停止移动设备麦克风输出");
+                return null;
+            }
+
+            if (selectedDevice is null)
+            {
+                return "请选择一台设备作为电脑麦克风。";
+            }
+            var output = SelectedPhoneMicrophoneOutput;
+            if (output is null)
+            {
+                return "未检测到 VB-CABLE 的 CABLE Input，请安装后刷新音频设备。";
+            }
+            if (!_engine.IsRemoteMicrophoneOutputActive)
+            {
+                var started = await Task.Run(() => _engine.StartRemoteMicrophoneOutput(
+                    output,
+                    bufferMilliseconds: PhonePairingService.MicrophoneOutputBufferMilliseconds,
+                    volumePercent: PhoneMicrophoneOutputVolume));
+                if (!started)
+                {
+                    return "无法打开 VB-CABLE 输出端点，请确认它未被其他应用独占。";
+                }
+                if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+                {
+                    await Task.Run(_engine.StopRemoteMicrophoneOutput);
+                    return null;
+                }
+            }
+
+            IsPhoneMicrophoneRouting = true;
+            if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+            {
+                await Task.Run(_engine.StopRemoteMicrophoneOutput);
+                IsPhoneMicrophoneRouting = false;
+                return null;
+            }
+            if (!await _phone.SetMicrophoneEnabledAsync(selectedDevice.Id, true))
+            {
+                await Task.Run(_engine.StopRemoteMicrophoneOutput);
+                IsPhoneMicrophoneRouting = false;
+                return "输出端点已经打开，但未能让选中的设备开始回传麦克风。";
+            }
+            AddActivity($"{selectedDevice.Name} 的麦克风将输出到 {output.Name}");
+            return null;
+        }
+        catch (Exception exception)
+        {
+            if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
+            {
+                return null;
+            }
+            if (_engine.IsRemoteMicrophoneOutputActive)
+            {
+                await Task.Run(_engine.StopRemoteMicrophoneOutput);
+            }
+            await _phone.SetMicrophoneEnabledAsync(false);
+            IsPhoneMicrophoneRouting = false;
+            return $"切换手机麦克风路由失败：{exception.Message}";
+        }
+        finally
+        {
+            IsPhoneMicrophoneRouteBusy = false;
+            _phoneMicrophoneRouteGate.Release();
+        }
+    }
+
+    private long BeginPhoneMicrophoneRouteIntent() =>
+        Interlocked.Increment(ref _phoneMicrophoneRouteIntentRevision);
+
+    private bool IsCurrentPhoneMicrophoneRouteIntent(long intentRevision) =>
+        intentRevision == Interlocked.Read(ref _phoneMicrophoneRouteIntentRevision);
+
+    public async Task<string?> TogglePhonePlaybackAsync()
+    {
+        if (IsPhonePlaybackRouteBusy)
+        {
+            return null;
+        }
+
+        IsPhonePlaybackRouteBusy = true;
+        try
+        {
+            if (IsPhonePlaybackRouting || _engine.IsSystemAudioCaptureActive)
+            {
+                await Task.Run(_engine.StopSystemAudioCapture);
+                var devicesToStop = PhoneDevices
+                    .Where(device => device.UseAsSpeaker || device.PlaybackRequested)
+                    .Select(device => device.Id)
+                    .ToArray();
+                await Task.WhenAll(devicesToStop.Select(
+                    deviceId => _phone.SetPlaybackEnabledAsync(deviceId, false)));
+                IsPhonePlaybackRouting = false;
+                IsPhonePlaybackStreaming = false;
+                AddActivity("已停止 Windows 声音到移动设备的播放链路");
+                return null;
+            }
+
+            var selectedDevices = PhoneDevices
+                .Where(device => device.UseAsSpeaker && device.SupportsPlayback)
+                .ToArray();
+            if (selectedDevices.Length == 0)
+            {
+                return "请选择至少一台设备作为电脑扬声器。";
+            }
+            var source = SelectedPhonePlaybackSource;
+            if (source is null)
+            {
+                return "请选择要发送到手机的 Windows 播放端点。";
+            }
+            var playbackResults = await Task.WhenAll(selectedDevices.Select(
+                device => _phone.SetPlaybackEnabledAsync(device.Id, true)));
+            var startedDeviceIds = selectedDevices
+                .Where((_, index) => playbackResults[index])
+                .Select(device => device.Id)
+                .ToArray();
+            if (startedDeviceIds.Length == 0)
+            {
+                return "未能让选中的设备准备音频播放。";
+            }
+
+            var started = await Task.Run(() => _engine.StartSystemAudioCapture(
+                source,
+                PhonePlaybackVolume));
+            if (!started)
+            {
+                await Task.WhenAll(startedDeviceIds.Select(
+                    deviceId => _phone.SetPlaybackEnabledAsync(deviceId, false)));
+                return "无法打开 Windows 系统声音捕获端点。";
+            }
+
+            IsPhonePlaybackRouting = true;
+            AddActivity($"Windows 声音将从 {source.Name} 发送到 {startedDeviceIds.Length} 台设备");
+            return null;
+        }
+        catch (Exception exception)
+        {
+            if (_engine.IsSystemAudioCaptureActive)
+            {
+                await Task.Run(_engine.StopSystemAudioCapture);
+            }
+            IsPhonePlaybackRouting = false;
+            IsPhonePlaybackStreaming = false;
+            return $"切换手机播放路由失败：{exception.Message}";
+        }
+        finally
+        {
+            IsPhonePlaybackRouteBusy = false;
+        }
+    }
+
+    public void DisconnectPhone() => _phone.DisconnectPhone();
+
+    public void DisconnectPhoneDevice(string deviceId) => _phone.DisconnectDevice(deviceId);
+
+    public async Task<string?> ReconnectSavedPhoneDeviceAsync(string deviceId)
+    {
+        var saved = SavedPhoneDevices.FirstOrDefault(device =>
+            string.Equals(device.Id, deviceId, StringComparison.OrdinalIgnoreCase));
+        if (saved is null)
+        {
+            return "未找到已保存的手机设备。";
+        }
+        if (PhoneDevices.Any(device =>
+                string.Equals(device.Id, deviceId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return "这台手机已经连接，无需重复连接。";
+        }
+
+        var requested = await _phone.RequestReconnectAsync(saved.RemoteAddress);
+        if (!requested)
+        {
+            return $"无法向 {saved.Name} 发送重连请求，请确认手机仍在同一局域网。";
+        }
+
+        AddActivity($"已向 {saved.Name} 发起主动连接请求");
+        return null;
+    }
+
+    public void ForgetSavedPhoneDevice(string deviceId)
+    {
+        if (!_savedPhoneDevices.Remove(deviceId))
+        {
+            return;
+        }
+        RefreshSavedPhoneDevices();
+        _ = SaveSettingsAsync();
+    }
+
+    public void ResetPhonePairing()
+    {
+        _phone.ResetPairing();
+        OnPropertyChanged(nameof(PhonePairingCode));
+        OnPropertyChanged(nameof(PhonePairingPayload));
+        _ = SaveSettingsAsync();
+    }
+
+    public bool StartWithWindows
+    {
+        get => _startWithWindows;
+        set
+        {
+            if (_startWithWindows == value)
+            {
+                return;
+            }
+
+            try
+            {
+                AutoStartService.SetEnabled(value);
+                SetField(ref _startWithWindows, value);
+                AddActivity(value ? "已启用开机自启动" : "已关闭开机自启动");
+            }
+            catch (Exception exception)
+            {
+                NoticeMessage = $"更新开机自启动失败：{exception.Message}";
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public async Task RefreshBluetoothDevicesAsync()
+    {
+        var devices = await _bluetooth.GetDevicesAsync();
+        Dispatch(() =>
+        {
+            ReplaceCollection(BluetoothDevices, devices);
+            SelectedBluetoothDevice = devices.Count > 0 ? devices[0] : null;
+        });
+    }
+
+    public async Task<string?> ConnectOrDisconnectBluetoothAsync()
+    {
+        if (IsBluetoothConnected)
+        {
+            _bluetooth.Disconnect();
+            return null;
+        }
+        if (SelectedBluetoothDevice is null)
+        {
+            return "请选择一个已配对的蓝牙音频设备。";
+        }
+
+        return await _bluetooth.ConnectAsync(SelectedBluetoothDevice)
+            ? null
+            : "未能建立蓝牙音频连接，请查看状态信息。";
+    }
+
+    public async Task RefreshDevicesAsync()
+    {
+        if (!IsEngineAvailable || IsRunning || IsCalibrating)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        NoticeMessage = null;
+        try
+        {
+            var renderTask = Task.Run(NativeAudioEngineBridge.GetRenderDevices);
+            var captureTask = Task.Run(NativeAudioEngineBridge.GetCaptureDevices);
+            await Task.WhenAll(renderTask, captureTask);
+            var render = await renderTask;
+            var capture = await captureTask;
+
+            ReplaceCollection(CaptureSources, render.Devices);
+            ReplaceCollection(Microphones, capture.Devices);
+            var virtualCableOutputs = render.Devices
+                .Where(IsVirtualCableInput)
+                .OrderBy(device => device.Name, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+            ReplaceCollection(PhoneMicrophoneOutputs, virtualCableOutputs);
+            SelectedPhoneMicrophoneOutput = FindById(
+                                               PhoneMicrophoneOutputs,
+                                               _host.Settings.PhoneMicrophoneOutputDeviceId)
+                                           ?? PhoneMicrophoneOutputs.FirstOrDefault();
+            OnPropertyChanged(nameof(HasVirtualCable));
+            NotifyPhoneRouteStateChanged();
+
+            SelectedCapture = FindById(CaptureSources, _host.Settings.CaptureDeviceId)
+                              ?? CaptureSources.FirstOrDefault(device => device.IsDefault)
+                              ?? CaptureSources.FirstOrDefault();
+            SelectedPhonePlaybackSource = FindById(
+                                              CaptureSources,
+                                              _host.Settings.PhonePlaybackSourceDeviceId)
+                                          ?? CaptureSources.FirstOrDefault(device => device.IsDefault)
+                                          ?? CaptureSources.FirstOrDefault();
+            SelectedMicrophone = FindById(Microphones, _host.Settings.MicrophoneDeviceId)
+                                 ?? Microphones.FirstOrDefault(device => device.IsDefault)
+                                 ?? Microphones.FirstOrDefault();
+
+            var errors = new[] { render.Error, capture.Error }
+                .Where(message => !string.IsNullOrWhiteSpace(message));
+            NoticeMessage = string.Join(Environment.NewLine, errors);
+            AddActivity($"已刷新设备：{render.Devices.Count} 个播放端点，{capture.Devices.Count} 个麦克风");
+        }
+        catch (Exception exception)
+        {
+            NoticeMessage = $"刷新设备失败：{exception.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public string? StartOrStop()
+    {
+        if (IsRunning || _isStarting || _engine.IsActive)
+        {
+            StatusBadge = "正在停止";
+            StatusTitle = "正在停止同步";
+            _engine.Stop();
+            return null;
+        }
+
+        if (IsCalibrating || IsStoppingCalibration || _engine.IsCalibrating)
+        {
+            return "请先停止声学校准，再开始音频同步。";
+        }
+
+        if (!IsEngineAvailable)
+        {
+            return NoticeMessage ?? "原生音频引擎不可用。";
+        }
+        if (SelectedCapture is null)
+        {
+            return "请选择系统声音来源。";
+        }
+
+        var selected = Outputs.Where(output => output.IsSelected).ToArray();
+        if (selected.Length == 0)
+        {
+            return "请至少选择一个输出设备。";
+        }
+        if (ContinuousAcousticTracking && selected.Length >= 2
+            && SelectedMicrophone is null)
+        {
+            return "启用自同步时，请选择用于连续测量的麦克风。";
+        }
+
+        foreach (var output in selected)
+        {
+            output.AutomaticDelayMilliseconds = 0;
+        }
+
+        var configuration = new EngineConfiguration(
+            SelectedCapture,
+            selected.Select(output => new OutputEngineSettings(
+                    output.Endpoint,
+                    output.VolumePercent,
+                    output.DelayMilliseconds))
+                .ToArray(),
+            BufferMilliseconds,
+            ExclusiveMode,
+            AutomaticLatencyCompensation,
+            SelectedMicrophone,
+            ContinuousAcousticTracking && selected.Length >= 2,
+            UseRemoteMicrophone: false);
+
+        _isStarting = true;
+        OnPropertyChanged(nameof(StartButtonText));
+        OnPropertyChanged(nameof(ControlsEnabled));
+        OnPropertyChanged(nameof(CanCalibrate));
+        UpdateOutputControlStates();
+        StatusBadge = "正在初始化";
+        StatusTitle = "正在建立同步时钟";
+        StatusMessage = $"正在连接 {selected.Length} 个输出端点，软件同步余量 {BufferMilliseconds} ms。";
+        AddActivity(StatusMessage);
+
+        if (!_engine.Start(configuration))
+        {
+            _isStarting = false;
+            OnPropertyChanged(nameof(StartButtonText));
+            OnPropertyChanged(nameof(ControlsEnabled));
+            OnPropertyChanged(nameof(CanCalibrate));
+            UpdateOutputControlStates();
+            return "音频引擎已经在启动或运行。";
+        }
+        return null;
+    }
+
+    public string? StartOrStopCalibration()
+    {
+        if (IsStoppingCalibration)
+        {
+            return null;
+        }
+        if (IsCalibrating || _engine.IsCalibrating)
+        {
+            IsStoppingCalibration = true;
+            StatusBadge = "正在停止";
+            StatusTitle = "正在停止校准";
+            StatusMessage = "正在释放校准使用的音频设备，请稍候。";
+            _engine.StopCalibration();
+            return null;
+        }
+        if (IsRunning || _isStarting)
+        {
+            return "请先停止音频同步，再开始声学校准。";
+        }
+        if (SelectedMicrophone is null)
+        {
+            return "请选择校准麦克风。";
+        }
+
+        var outputs = Outputs.Where(output => output.IsSelected).Select(output => output.Endpoint).ToArray();
+        if (outputs.Length < 2)
+        {
+            return "自动校准至少需要两个输出设备。";
+        }
+
+        ClearCalibrationNotice();
+        IsCalibrating = _engine.StartCalibration(new CalibrationConfiguration(SelectedMicrophone, outputs));
+        if (!IsCalibrating)
+        {
+            return "校准器已经在运行。";
+        }
+
+        StatusBadge = "校准中";
+        StatusTitle = "正在测量声学路径";
+        StatusMessage = "请保持麦克风位置不变，并避免在测量期间产生额外声音。";
+        AddActivity("声学校准已开始");
+        return null;
+    }
+
+    public void NotifyOutputSettingsChanged(OutputEndpointItem output)
+    {
+        RebuildSelectedOutputs();
+        if (_engine.IsActive)
+        {
+            _engine.SetOutputVolume(output.Id, output.VolumePercent);
+            _engine.SetOutputDelay(output.Id, output.DelayMilliseconds);
+        }
+        _ = SaveSettingsAsync();
+    }
+
+    private void RebuildOutputs()
+    {
+        foreach (var output in Outputs)
+        {
+            output.SettingsChanged -= Output_SettingsChanged;
+            _savedOutputs[output.Id] = new OutputSettings(
+                output.IsSelected,
+                output.VolumePercent,
+                output.DelayMilliseconds);
+        }
+        Outputs.Clear();
+
+        foreach (var endpoint in CaptureSources.Where(device =>
+                     !string.Equals(device.Id, SelectedCapture?.Id, StringComparison.OrdinalIgnoreCase)))
+        {
+            var item = new OutputEndpointItem(endpoint);
+            item.SelectionEnabled = ControlsEnabled;
+            item.AdjustmentsEnabled = AdjustmentsEnabled;
+            if (_savedOutputs.TryGetValue(endpoint.Id, out var settings))
+            {
+                item.IsSelected = settings.Selected;
+                item.VolumePercent = settings.VolumePercent;
+                item.DelayMilliseconds = settings.DelayMilliseconds;
+            }
+            item.SettingsChanged += Output_SettingsChanged;
+            Outputs.Add(item);
+        }
+        RebuildSelectedOutputs();
+    }
+
+    private void Output_SettingsChanged(object? sender, EventArgs args)
+    {
+        if (sender is OutputEndpointItem output)
+        {
+            NotifyOutputSettingsChanged(output);
+        }
+    }
+
+    private void RebuildSelectedOutputs()
+    {
+        SelectedOutputs.Clear();
+        foreach (var output in Outputs.Where(output => output.IsSelected))
+        {
+            SelectedOutputs.Add(output);
+        }
+        OnPropertyChanged(nameof(SelectedOutputs));
+    }
+
+    private void UpdateOutputControlStates()
+    {
+        foreach (var output in Outputs)
+        {
+            output.SelectionEnabled = ControlsEnabled;
+            output.AdjustmentsEnabled = AdjustmentsEnabled;
+        }
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        foreach (var output in Outputs)
+        {
+            _savedOutputs[output.Id] = new OutputSettings(
+                output.IsSelected,
+                output.VolumePercent,
+                output.DelayMilliseconds);
+        }
+
+        var settings = new AppSettings
+        {
+            CaptureDeviceId = SelectedCapture?.Id,
+            MicrophoneDeviceId = SelectedMicrophone?.Id,
+            BufferMilliseconds = BufferMilliseconds,
+            AutomaticLatencyCompensation = AutomaticLatencyCompensation,
+            ContinuousAcousticTracking = ContinuousAcousticTracking,
+            ExclusiveMode = ExclusiveMode,
+            ThemeMode = ThemeMode,
+            PhonePairingAddress = SelectedPhoneAddress,
+            PhonePairingSessionId = _phone.PairingSessionId,
+            PhonePairingSecret = _phone.PairingSecret,
+            PhoneMicrophoneOutputDeviceId = SelectedPhoneMicrophoneOutput?.Id,
+            PhoneMicrophoneOutputVolume = PhoneMicrophoneOutputVolume,
+            PhonePlaybackSourceDeviceId = SelectedPhonePlaybackSource?.Id,
+            PhonePlaybackVolume = PhonePlaybackVolume,
+            PhoneDevices = new Dictionary<string, PhoneDeviceSettings>(
+                _savedPhoneDevices,
+                StringComparer.OrdinalIgnoreCase),
+            ComputerShortcuts = _computerShortcuts.ToList(),
+            Outputs = new Dictionary<string, OutputSettings>(_savedOutputs, StringComparer.OrdinalIgnoreCase),
+        };
+        var revision = Interlocked.Increment(ref _settingsRevision);
+        await _settingsSaveGate.WaitAsync();
+        try
+        {
+            if (_disposed || revision != Volatile.Read(ref _settingsRevision))
+            {
+                return;
+            }
+            await _host.SaveSettingsAsync(settings);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Dispatch(() => NoticeMessage = $"保存设置失败：{exception.Message}");
+        }
+        finally
+        {
+            _settingsSaveGate.Release();
+        }
+    }
+
+    private void Engine_StatusChanged(object? sender, string message) => Dispatch(() =>
+    {
+        StatusMessage = message;
+        AddActivity(message);
+    });
+
+    private void Engine_ErrorOccurred(object? sender, string message) => Dispatch(() =>
+    {
+        if (IsCalibrating || IsStoppingCalibration || _engine.IsCalibrating)
+        {
+            SetCalibrationNotice(message);
+        }
+        else
+        {
+            NoticeMessage = message;
+        }
+        StatusBadge = "需要处理";
+        StatusTitle = "同步遇到问题";
+        StatusMessage = message;
+        AddActivity(message);
+    });
+
+    private void Engine_RunningChanged(object? sender, bool running) => Dispatch(() =>
+    {
+        _isStarting = false;
+        IsRunning = running;
+        OnPropertyChanged(nameof(StartButtonText));
+        OnPropertyChanged(nameof(ControlsEnabled));
+        UpdateOutputControlStates();
+        StatusBadge = running ? "同步中" : "已停止";
+        StatusTitle = running ? "所有输出共享同一时间线" : "同步已停止";
+        if (!running)
+        {
+            ProgramLevelText = "节目电平 -- dBFS · 探针暂停";
+        }
+    });
+
+    private void Engine_ProgramLevelChanged(object? sender, ProgramLevelEventArgs args) => Dispatch(() =>
+    {
+        var level = Math.Clamp(args.LevelDbfs, -160.0, 0.0);
+        ProgramLevelText = $"节目电平 {level:0.0} dBFS · 探针{(args.ProbeAllowed ? "可用" : "暂停")}";
+    });
+
+    private void Engine_AcousticCorrectionChanged(object? sender, AcousticCorrectionEventArgs args) =>
+        Dispatch(() =>
+        {
+            var output = Outputs.FirstOrDefault(item =>
+                string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+            if (output is null)
+            {
+                return;
+            }
+
+            output.AutomaticDelayMilliseconds = args.DelayMilliseconds;
+            output.CorrectionText =
+                $"{args.ProbeMode} · 自动 {args.DelayMilliseconds:+0;-0;0} ms · "
+                + $"漂移 {args.DriftPpm:+0.0;-0.0;0.0} ppm · 置信度 {args.Confidence:P0}";
+        });
+
+    private void Engine_CalibrationCompleted(object? sender, CalibrationCompletedEventArgs args) => Dispatch(() =>
+    {
+        IsCalibrating = false;
+        IsStoppingCalibration = false;
+        if (args.Outcome != CalibrationOutcome.Failed)
+        {
+            ClearCalibrationNotice();
+        }
+        if (args.Outcome == CalibrationOutcome.Cancelled)
+        {
+            StatusBadge = "已取消";
+            StatusTitle = "校准已停止";
+            StatusMessage = "音频设备已释放，可以重新校准或开始同步。";
+            AddActivity("声学校准已取消");
+            return;
+        }
+        if (args.Outcome == CalibrationOutcome.Failed)
+        {
+            return;
+        }
+
+        var applied = 0;
+        foreach (var result in args.Results)
+        {
+            var output = Outputs.FirstOrDefault(item =>
+                string.Equals(item.Id, result.Device.Id, StringComparison.OrdinalIgnoreCase));
+            if (output is null)
+            {
+                continue;
+            }
+
+            output.CorrectionText = result.Detected
+                ? $"{result.MeasuredLatencyMilliseconds:0.0} ms · 置信度 {result.Confidence:P0}"
+                : "未检测到有效到达峰";
+            if (result.Detected)
+            {
+                output.AutomaticDelayMilliseconds = 0;
+                output.DelayMilliseconds = result.RecommendedDelayMilliseconds;
+                applied++;
+            }
+        }
+
+        if (applied > 0)
+        {
+            AutomaticLatencyCompensation = false;
+        }
+        StatusBadge = "校准完成";
+        StatusTitle = $"已对齐 {applied} 个输出";
+        StatusMessage = applied > 0
+            ? "声学路径补偿已写入设备，并关闭端点自动补偿以避免重复计算。"
+            : "未获得可应用的测量结果，请检查麦克风位置和播放音量。";
+        AddActivity(StatusMessage);
+    });
+
+    private void SetCalibrationNotice(string message)
+    {
+        NoticeMessage = message;
+        _calibrationNoticeRevision = _noticeRevision;
+    }
+
+    private void ClearCalibrationNotice()
+    {
+        if (_calibrationNoticeRevision is not { } calibrationRevision)
+        {
+            return;
+        }
+
+        _calibrationNoticeRevision = null;
+        if (_noticeRevision == calibrationRevision)
+        {
+            NoticeMessage = null;
+        }
+    }
+
+    private void Bluetooth_StatusChanged(object? sender, string message) => Dispatch(() =>
+    {
+        BluetoothStatus = message;
+        AddActivity(message);
+    });
+
+    private void Bluetooth_ErrorOccurred(object? sender, string message) => Dispatch(() =>
+    {
+        BluetoothStatus = message;
+        NoticeMessage = message;
+        AddActivity(message);
+    });
+
+    private void Bluetooth_BusyChanged(object? sender, bool busy) =>
+        Dispatch(() => IsBluetoothBusy = busy);
+
+    private void Bluetooth_ConnectionChanged(object? sender, bool connected) => Dispatch(() =>
+    {
+        IsBluetoothConnected = connected;
+        OnPropertyChanged(nameof(BluetoothActionText));
+    });
+
+    private void Phone_StatusChanged(object? sender, string message) => Dispatch(() =>
+    {
+        PhoneStatus = message;
+        AddActivity(message);
+    });
+
+    private void Phone_ConnectionChanged(object? sender, PhoneConnectionChangedEventArgs args) => Dispatch(() =>
+    {
+        if (!args.Connected)
+        {
+            // 手机断开时无论网络是否完整发送了 UP/CANCEL，都释放电脑端按键和鼠标键。
+            _input.PanicRelease();
+        }
+        AddActivity(args.Connected
+            ? $"移动设备已连接：{args.PhoneName}"
+            : $"移动设备已断开：{args.PhoneName}");
+        if (args.Connected)
+        {
+            _phone.BroadcastComputerShortcuts(_computerShortcuts);
+        }
+    });
+
+    private void Phone_DevicesChanged(object? sender, PhoneDevicesChangedEventArgs args) =>
+        Dispatch(() => SyncPhoneDevices(args.Devices));
+
+    private void SyncPhoneDevices(IReadOnlyList<PhoneDeviceSnapshot> snapshots)
+    {
+        var normalizedMicrophoneSelection = false;
+        var savedDeviceMetadataChanged = false;
+        var snapshotIds = snapshots
+            .Select(snapshot => snapshot.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var removed in PhoneDevices.Where(device => !snapshotIds.Contains(device.Id)).ToArray())
+        {
+            _savedPhoneDevices.TryGetValue(removed.Id, out var previousSettings);
+            var updatedSettings = removed.ToSettings(previousSettings?.LastConnectedAt);
+            savedDeviceMetadataChanged |= SavedDeviceMetadataChanged(previousSettings, updatedSettings);
+            _savedPhoneDevices[removed.Id] = updatedSettings;
+            removed.SettingsChanged -= PhoneDevice_SettingsChanged;
+            PhoneDevices.Remove(removed);
+        }
+
+        foreach (var snapshot in snapshots)
+        {
+            var item = PhoneDevices.FirstOrDefault(device =>
+                string.Equals(device.Id, snapshot.Id, StringComparison.OrdinalIgnoreCase));
+            if (item is null)
+            {
+                var hasSavedSettings = _savedPhoneDevices.TryGetValue(snapshot.Id, out var settings);
+                settings ??= new PhoneDeviceSettings(
+                    UseAsMicrophone: false,
+                    UseAsSpeaker: snapshot.SupportsPlayback,
+                    MicrophoneGainPercent: 100);
+                // 麦克风开关表示当前会话的实际路由，不跨设备重连恢复。
+                if (settings.UseAsMicrophone)
+                {
+                    settings = settings with { UseAsMicrophone = false };
+                    normalizedMicrophoneSelection |= hasSavedSettings;
+                }
+                item = new PhoneDeviceItem(snapshot, settings);
+                item.SettingsChanged += PhoneDevice_SettingsChanged;
+                PhoneDevices.Add(item);
+                var updatedSettings = item.ToSettings(settings?.LastConnectedAt);
+                savedDeviceMetadataChanged |= SavedDeviceMetadataChanged(
+                    hasSavedSettings ? settings : null,
+                    updatedSettings);
+                _savedPhoneDevices[item.Id] = updatedSettings;
+                _phone.SetMicrophoneGain(item.Id, item.MicrophoneGainPercent);
+
+                if (IsPhonePlaybackRouting && item.UseAsSpeaker && item.SupportsPlayback)
+                {
+                    _ = _phone.SetPlaybackEnabledAsync(item.Id, true);
+                }
+            }
+            else
+            {
+                _savedPhoneDevices.TryGetValue(item.Id, out var previousSettings);
+                item.Update(snapshot);
+                var updatedSettings = item.ToSettings(previousSettings?.LastConnectedAt);
+                if (SavedDeviceMetadataChanged(previousSettings, updatedSettings))
+                {
+                    savedDeviceMetadataChanged = true;
+                    _savedPhoneDevices[item.Id] = updatedSettings;
+                }
+            }
+        }
+
+        var selectedMicrophone = PhoneDevices.FirstOrDefault(device => device.UseAsMicrophone);
+        if (selectedMicrophone is not null)
+        {
+            _updatingPhoneMicrophoneSelection = true;
+            try
+            {
+                foreach (var otherDevice in PhoneDevices.Where(device =>
+                             device.UseAsMicrophone && !ReferenceEquals(device, selectedMicrophone)))
+                {
+                    otherDevice.UseAsMicrophone = false;
+                    _savedPhoneDevices[otherDevice.Id] = otherDevice.ToSettings();
+                    normalizedMicrophoneSelection = true;
+                }
+            }
+            finally
+            {
+                _updatingPhoneMicrophoneSelection = false;
+            }
+        }
+
+        _phoneName = _phone.ConnectedPhoneName;
+        IsPhoneConnected = PhoneDevices.Count > 0;
+        IsPhoneMicrophoneStreaming = PhoneDevices.Any(device => device.MicrophoneStreaming);
+        IsPhonePlaybackStreaming = PhoneDevices.Any(device => device.PlaybackStreaming);
+
+        if (PhoneDevices.Count == 0 || SelectedPhoneMicrophoneCount == 0)
+        {
+            if (IsPhoneMicrophoneRouting || _engine.IsRemoteMicrophoneOutputActive)
+            {
+                _ = Task.Run(_engine.StopRemoteMicrophoneOutput);
+                IsPhoneMicrophoneRouting = false;
+            }
+        }
+        if (PhoneDevices.Count == 0 || SelectedPhoneSpeakerCount == 0)
+        {
+            if (IsPhonePlaybackRouting || _engine.IsSystemAudioCaptureActive)
+            {
+                _ = Task.Run(_engine.StopSystemAudioCapture);
+                IsPhonePlaybackRouting = false;
+                IsPhonePlaybackStreaming = false;
+            }
+        }
+        NotifyPhoneDeviceSelectionChanged();
+        if (savedDeviceMetadataChanged)
+        {
+            RefreshSavedPhoneDevices();
+            _ = SaveSettingsAsync();
+        }
+        else if (normalizedMicrophoneSelection)
+        {
+            _ = SaveSettingsAsync();
+        }
+    }
+
+    private void RefreshSavedPhoneDevices()
+    {
+        var saved = _savedPhoneDevices
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Value.Name)
+                           && !string.IsNullOrWhiteSpace(pair.Value.RemoteAddress))
+            .Select(pair => new SavedPhoneDevice(
+                pair.Key,
+                pair.Value.Name!,
+                pair.Value.RemoteAddress!,
+                pair.Value.LastConnectedAt ?? DateTimeOffset.MinValue))
+            .OrderByDescending(device => device.LastConnectedAt)
+            .ToArray();
+        ReplaceCollection(SavedPhoneDevices, saved);
+        OnPropertyChanged(nameof(HasSavedPhoneDevices));
+    }
+
+    private static bool SavedDeviceMetadataChanged(
+        PhoneDeviceSettings? previous,
+        PhoneDeviceSettings current) => previous is null
+                                         || !string.Equals(
+                                             previous.Name,
+                                             current.Name,
+                                             StringComparison.Ordinal)
+                                         || !string.Equals(
+                                             previous.RemoteAddress,
+                                             current.RemoteAddress,
+                                             StringComparison.OrdinalIgnoreCase)
+                                         || previous.LastConnectedAt != current.LastConnectedAt;
+
+    private async Task RequestSavedPhoneReconnectsAsync()
+    {
+        var savedDevices = SavedPhoneDevices.ToArray();
+        // 会话 ID 在 Windows 端持久化；先广播一次，不依赖旧 IP，覆盖 DHCP 换址和旧版本未保存地址的情况。
+        await _phone.RequestReconnectAsync(null).ConfigureAwait(false);
+        foreach (var saved in savedDevices)
+        {
+            if (_disposed || PhoneDevices.Any(device =>
+                    string.Equals(device.Id, saved.Id, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+            await _phone.RequestReconnectAsync(saved.RemoteAddress).ConfigureAwait(false);
+        }
+    }
+
+    private async void PhoneDevice_SettingsChanged(object? sender, string propertyName)
+    {
+        if (sender is not PhoneDeviceItem device)
+        {
+            return;
+        }
+
+        _savedPhoneDevices[device.Id] = device.ToSettings();
+        if (_updatingPhoneMicrophoneSelection)
+        {
+            return;
+        }
+        if (propertyName == nameof(PhoneDeviceItem.MicrophoneGainPercent))
+        {
+            _phone.SetMicrophoneGain(device.Id, device.MicrophoneGainPercent);
+        }
+        else if (propertyName == nameof(PhoneDeviceItem.UseAsMicrophone))
+        {
+            if (device.UseAsMicrophone)
+            {
+                SetPhoneMicrophoneSelection(device);
+            }
+
+            var shouldStopRoute = !device.UseAsMicrophone
+                                  && (device.MicrophoneStreaming
+                                      || !PhoneDevices.Any(item => item.UseAsMicrophone));
+            var routeIntent = BeginPhoneMicrophoneRouteIntent();
+            var error = await SetPhoneMicrophoneRouteAsync(
+                device,
+                device.UseAsMicrophone && !shouldStopRoute,
+                routeIntent);
+            if (error is not null)
+            {
+                SetPhoneMicrophoneSelection(null);
+                await _phone.SetMicrophoneEnabledAsync(device.Id, false);
+                NoticeMessage = error;
+            }
+        }
+        else if (propertyName == nameof(PhoneDeviceItem.UseAsSpeaker)
+                 && IsPhonePlaybackRouting
+                 && device.SupportsPlayback)
+        {
+            await _phone.SetPlaybackEnabledAsync(device.Id, device.UseAsSpeaker);
+            if (!PhoneDevices.Any(item => item.UseAsSpeaker && item.SupportsPlayback))
+            {
+                await Task.Run(_engine.StopSystemAudioCapture);
+                IsPhonePlaybackRouting = false;
+                IsPhonePlaybackStreaming = false;
+            }
+        }
+
+        NotifyPhoneDeviceSelectionChanged();
+        await SaveSettingsAsync();
+    }
+
+    private void SetPhoneMicrophoneSelection(PhoneDeviceItem? selectedDevice)
+    {
+        _updatingPhoneMicrophoneSelection = true;
+        try
+        {
+            foreach (var device in PhoneDevices)
+            {
+                var selected = ReferenceEquals(device, selectedDevice);
+                if (device.UseAsMicrophone != selected)
+                {
+                    device.UseAsMicrophone = selected;
+                }
+                _savedPhoneDevices[device.Id] = device.ToSettings();
+            }
+        }
+        finally
+        {
+            _updatingPhoneMicrophoneSelection = false;
+        }
+        NotifyPhoneDeviceSelectionChanged();
+        _ = SaveSettingsAsync();
+    }
+
+    private void Phone_MicrophoneRouteRequested(
+        object? sender,
+        PhoneMicrophoneRequestEventArgs args) => Dispatch(() =>
+    {
+        AddActivity($"收到 {args.DeviceName} 的手机麦克风{(args.Enabled ? "启用" : "停止")}请求");
+        _ = ApplyPhoneMicrophoneRequestAsync(args);
+    });
+
+    private async Task ApplyPhoneMicrophoneRequestAsync(PhoneMicrophoneRequestEventArgs args)
+    {
+        var device = PhoneDevices.FirstOrDefault(item =>
+            string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+        if (device is null)
+        {
+            // 请求可能先于 DevicesChanged 进入 UI 队列，先用服务端快照补齐设备列表，
+            // 避免手机刚连上时的第一次启停请求被误判为未知设备。
+            SyncPhoneDevices(_phone.ConnectedDevices);
+            device = PhoneDevices.FirstOrDefault(item =>
+                string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+        }
+        if (device is null)
+        {
+            AddActivity($"未找到请求设备 {args.DeviceId}，已拒绝手机麦克风请求");
+            if (!args.StateApplied)
+            {
+                await _phone.SetMicrophoneEnabledAsync(args.DeviceId, false);
+            }
+            return;
+        }
+
+        SetPhoneMicrophoneSelection(args.Enabled ? device : null);
+        var routeIntent = BeginPhoneMicrophoneRouteIntent();
+        var error = await SetPhoneMicrophoneRouteAsync(
+            device,
+            args.Enabled,
+            routeIntent,
+            args.StateApplied);
+        if (error is null)
+        {
+            return;
+        }
+
+        SetPhoneMicrophoneSelection(null);
+        await _phone.SetMicrophoneEnabledAsync(device.Id, false);
+        NoticeMessage = $"{args.DeviceName} 无法启用麦克风：{error}";
+    }
+
+    private void Phone_MicrophoneControlFailed(
+        object? sender,
+        PhoneMicrophoneErrorEventArgs args) => Dispatch(() =>
+    {
+        _ = HandlePhoneMicrophoneFailureAsync(args);
+    });
+
+    private async Task HandlePhoneMicrophoneFailureAsync(PhoneMicrophoneErrorEventArgs args)
+    {
+        var device = PhoneDevices.FirstOrDefault(item =>
+            string.Equals(item.Id, args.DeviceId, StringComparison.OrdinalIgnoreCase));
+        if (device is not null && (device.UseAsMicrophone || device.MicrophoneStreaming))
+        {
+            SetPhoneMicrophoneSelection(null);
+            var routeIntent = BeginPhoneMicrophoneRouteIntent();
+            await SetPhoneMicrophoneRouteAsync(device, false, routeIntent);
+        }
+        NoticeMessage = $"{args.DeviceName} 麦克风启动失败：{args.Message}";
+    }
+
+    private void Phone_MicrophoneStreamingChanged(object? sender, bool enabled) => Dispatch(() =>
+    {
+        IsPhoneMicrophoneStreaming = enabled;
+    });
+
+    private void Phone_MicrophoneLevelChanged(object? sender, double levelDbfs) => Dispatch(() =>
+    {
+        PhoneLevelPercent = Math.Clamp((levelDbfs + 60) / 60 * 100, 0, 100);
+    });
+
+    private void Phone_PlaybackStreamingChanged(object? sender, bool enabled) => Dispatch(() =>
+    {
+        IsPhonePlaybackStreaming = enabled;
+    });
+
+    private void Phone_InputPointerReceived(object? sender, PhoneInputPointerEventArgs args)
+    {
+        try
+        {
+            // 增量单位为 1/1000 像素；限制单帧增量，避免异常手机数据把鼠标瞬移到屏幕外。
+            if (args.Action == 3)
+            {
+                _input.PanicRelease();
+                return;
+            }
+
+            var deltaX = Math.Clamp(args.DeltaX / 1000.0, -240.0, 240.0);
+            var deltaY = Math.Clamp(args.DeltaY / 1000.0, -240.0, 240.0);
+            if (Math.Abs(deltaX) > 0.001 || Math.Abs(deltaY) > 0.001)
+            {
+                _input.Move(deltaX, deltaY);
+            }
+        }
+        catch (Exception exception)
+        {
+            ReportInputFailure("触摸输入不可用", exception);
+        }
+    }
+
+    private void Phone_InputButtonReceived(object? sender, PhoneInputButtonEventArgs args)
+    {
+        try
+        {
+            if (args.Button is < 1 or > 5 || args.State is > 1)
+            {
+                return;
+            }
+
+            _input.SetMouseButton(args.Button, args.State == 1);
+        }
+        catch (Exception exception)
+        {
+            ReportInputFailure("鼠标按键输入不可用", exception);
+        }
+    }
+
+    private void Phone_InputScrollReceived(object? sender, PhoneInputScrollEventArgs args)
+    {
+        try
+        {
+            var deltaX = Math.Clamp(args.DeltaX / 1000.0, -480.0, 480.0);
+            var deltaY = Math.Clamp(args.DeltaY / 1000.0, -480.0, 480.0);
+            _input.Scroll(deltaX, deltaY);
+        }
+        catch (Exception exception)
+        {
+            ReportInputFailure("滚动输入不可用", exception);
+        }
+    }
+
+    private void ReportInputFailure(string message, Exception exception)
+    {
+        try
+        {
+            Dispatch(() => NoticeMessage = $"{message}：{exception.Message}");
+        }
+        catch
+        {
+            // 输入错误是单帧故障，不能影响手机功能通道的持续读取。
+        }
+    }
+
+    private void Phone_ShortcutReceived(object? sender, PhoneShortcutEventArgs args) => Dispatch(() =>
+    {
+        if (_shortcuts.TryExecuteJson(
+                args.Payload,
+                appId => _computerShortcuts.FirstOrDefault(item =>
+                    string.Equals(item.Id, appId, StringComparison.OrdinalIgnoreCase)),
+                out var error))
+        {
+            FeatureStatus = $"已执行手机快捷键（{args.DeviceName}）";
+            AddActivity(FeatureStatus);
+        }
+        else
+        {
+            FeatureStatus = $"快捷键被拒绝：{error}";
+            NoticeMessage = FeatureStatus;
+        }
+    });
+
+    private void Phone_FileOfferReceived(object? sender, PhoneFileOfferEventArgs args) => Dispatch(() =>
+    {
+        FeatureStatus = $"正在接收 {args.DeviceName} 的文件…";
+        AddActivity(FeatureStatus);
+    });
+
+    private void Phone_FileCompleteReceived(object? sender, PhoneFileCompleteEventArgs args) => Dispatch(() =>
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(args.Payload);
+            var name = document.RootElement.TryGetProperty("name", out var nameElement)
+                ? nameElement.GetString()
+                : null;
+            FeatureStatus = string.IsNullOrWhiteSpace(name)
+                ? $"已完成来自 {args.DeviceName} 的文件接收"
+                : $"已接收文件：{name}";
+        }
+        catch (JsonException)
+        {
+            FeatureStatus = $"已完成来自 {args.DeviceName} 的文件接收";
+        }
+        AddActivity(FeatureStatus);
+    });
+
+    private void Phone_ScanResultReceived(object? sender, PhoneScanResultEventArgs args) => Dispatch(async () =>
+    {
+        string? rawValue = null;
+        try
+        {
+            using var document = JsonDocument.Parse(args.Payload);
+            rawValue = document.RootElement.TryGetProperty("rawValue", out var value)
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            // 非 JSON 的旧客户端结果仍然作为文本显示，不自动打开。
+        }
+
+        LastScanResult = rawValue ?? args.Payload;
+        OnPropertyChanged(nameof(HasScanResult));
+        FeatureStatus = $"已收到 {args.DeviceName} 的扫码结果";
+        AddActivity($"扫码结果：{LastScanResult}");
+        if (Uri.TryCreate(rawValue, UriKind.Absolute, out var uri)
+            && (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)
+                || uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)))
+        {
+            await WinSystem.Launcher.LaunchUriAsync(uri);
+        }
+    });
+
+    private void Phone_CaptureResultReceived(object? sender, PhoneCaptureResultEventArgs args) => Dispatch(() =>
+    {
+        FeatureStatus = $"手机照片已准备传输（{args.DeviceName}）";
+        AddActivity(FeatureStatus);
+    });
+
+    private void AddActivity(string message)
+    {
+        Activity.Insert(0, $"{DateTimeOffset.Now:HH:mm:ss}  {message}");
+        while (Activity.Count > 80)
+        {
+            Activity.RemoveAt(Activity.Count - 1);
+        }
+    }
+
+    private void Dispatch(Action action)
+    {
+        if (_dispatcher.HasThreadAccess)
+        {
+            action();
+        }
+        else
+        {
+            _dispatcher.TryEnqueue(() => action());
+        }
+    }
+
+    private static AudioEndpoint? FindById(IEnumerable<AudioEndpoint> devices, string? id) =>
+        string.IsNullOrWhiteSpace(id)
+            ? null
+            : devices.FirstOrDefault(device => string.Equals(device.Id, id, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsVirtualCableInput(AudioEndpoint device)
+    {
+        var name = device.Name;
+        return name.Contains("CABLE Input", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("CABLE-A Input", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("CABLE-B Input", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("CABLE-C Input", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("CABLE-D Input", StringComparison.OrdinalIgnoreCase)
+               || name.Contains("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void NotifyPhoneRouteStateChanged()
+    {
+        OnPropertyChanged(nameof(CanTogglePhoneMicrophoneRoute));
+        OnPropertyChanged(nameof(PhoneMicrophoneRouteActionText));
+        OnPropertyChanged(nameof(PhoneMicrophoneRouteBadge));
+        OnPropertyChanged(nameof(PhoneMicrophoneRouteStatus));
+    }
+
+    private void NotifyPhonePlaybackStateChanged()
+    {
+        OnPropertyChanged(nameof(CanTogglePhonePlayback));
+        OnPropertyChanged(nameof(PhonePlaybackActionText));
+        OnPropertyChanged(nameof(PhonePlaybackBadge));
+        OnPropertyChanged(nameof(PhonePlaybackStatus));
+        OnPropertyChanged(nameof(PhonePlaybackSourceEnabled));
+    }
+
+    private void NotifyPhoneDeviceSelectionChanged()
+    {
+        OnPropertyChanged(nameof(ConnectedPhoneDeviceCount));
+        OnPropertyChanged(nameof(ConnectedPhoneDeviceCountText));
+        OnPropertyChanged(nameof(SelectedPhoneMicrophoneCount));
+        OnPropertyChanged(nameof(SelectedPhoneSpeakerCount));
+        OnPropertyChanged(nameof(PhoneRouteSelectionText));
+        OnPropertyChanged(nameof(PhoneConnectionText));
+        OnPropertyChanged(nameof(CanRequestPhoneFeatures));
+        NotifyPhoneRouteStateChanged();
+        NotifyPhonePlaybackStateChanged();
+    }
+
+    private static void ReplaceCollection<T>(ObservableCollection<T> collection, IEnumerable<T> values)
+    {
+        collection.Clear();
+        foreach (var value in values)
+        {
+            collection.Add(value);
+        }
+    }
+
+    private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return false;
+        }
+
+        field = value;
+        OnPropertyChanged(propertyName);
+        return true;
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _engine.StopRemoteMicrophoneOutput();
+        _engine.StopSystemAudioCapture();
+        _engine.StatusChanged -= Engine_StatusChanged;
+        _engine.ErrorOccurred -= Engine_ErrorOccurred;
+        _engine.RunningChanged -= Engine_RunningChanged;
+        _engine.ProgramLevelChanged -= Engine_ProgramLevelChanged;
+        _engine.CalibrationCompleted -= Engine_CalibrationCompleted;
+        _engine.AcousticCorrectionChanged -= Engine_AcousticCorrectionChanged;
+        _bluetooth.StatusChanged -= Bluetooth_StatusChanged;
+        _bluetooth.ErrorOccurred -= Bluetooth_ErrorOccurred;
+        _bluetooth.BusyChanged -= Bluetooth_BusyChanged;
+        _bluetooth.ConnectionChanged -= Bluetooth_ConnectionChanged;
+        _phone.StatusChanged -= Phone_StatusChanged;
+        _phone.ConnectionChanged -= Phone_ConnectionChanged;
+        _phone.DevicesChanged -= Phone_DevicesChanged;
+        _phone.MicrophoneRouteRequested -= Phone_MicrophoneRouteRequested;
+        _phone.MicrophoneControlFailed -= Phone_MicrophoneControlFailed;
+        _phone.MicrophoneStreamingChanged -= Phone_MicrophoneStreamingChanged;
+        _phone.MicrophoneLevelChanged -= Phone_MicrophoneLevelChanged;
+        _phone.PlaybackStreamingChanged -= Phone_PlaybackStreamingChanged;
+        _phone.InputPointerReceived -= Phone_InputPointerReceived;
+        _phone.InputButtonReceived -= Phone_InputButtonReceived;
+        _phone.InputScrollReceived -= Phone_InputScrollReceived;
+        _phone.ShortcutReceived -= Phone_ShortcutReceived;
+        _phone.FileOfferReceived -= Phone_FileOfferReceived;
+        _phone.FileCompleteReceived -= Phone_FileCompleteReceived;
+        _phone.ScanResultReceived -= Phone_ScanResultReceived;
+        _phone.CaptureResultReceived -= Phone_CaptureResultReceived;
+        _phone.ComputerShortcutsProvider = null;
+        _input.PanicRelease();
+        foreach (var output in Outputs)
+        {
+            output.SettingsChanged -= Output_SettingsChanged;
+        }
+        foreach (var device in PhoneDevices)
+        {
+            device.SettingsChanged -= PhoneDevice_SettingsChanged;
+        }
+    }
+}

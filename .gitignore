@@ -4,6 +4,8 @@
 /artifacts/
 /VoiceSpreader.zip
 /.vs/
+/.vs1221-bundle-work/
+/.vs123-bundle-work/
 **/bin/
 **/obj/
 *.user

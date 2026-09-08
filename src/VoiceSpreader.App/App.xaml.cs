@@ -16,14 +16,24 @@ public partial class App : Application
 
     public AppHost Host { get; } = new();
 
+    public MainWindow? MainWindow => _window;
+
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
+    {
+        await LaunchAsync(
+            IsBackgroundLaunch(args.Arguments)
+            || IsStartupTaskLaunch());
+    }
+
+    private async Task LaunchAsync(bool background)
     {
         try
         {
+            Directory.SetCurrentDirectory(AppContext.BaseDirectory);
             await Host.InitializeAsync();
             _window = new MainWindow();
             _window.ApplyTheme(Host.Settings.ThemeMode);
-            if (!Environment.GetCommandLineArgs().Contains("--background", StringComparer.OrdinalIgnoreCase))
+            if (!background)
             {
                 _window.Activate();
             }
@@ -32,6 +42,25 @@ public partial class App : Application
         {
             WriteStartupFailure(exception);
             Exit();
+        }
+    }
+
+    private static bool IsBackgroundLaunch(string? arguments) =>
+        arguments?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Contains("--background", StringComparer.OrdinalIgnoreCase) == true
+        || Environment.GetCommandLineArgs().Contains("--background", StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsStartupTaskLaunch()
+    {
+        try
+        {
+            return Windows.ApplicationModel.AppInstance.GetActivatedEventArgs()?.Kind
+                   == Windows.ApplicationModel.Activation.ActivationKind.StartupTask;
+        }
+        catch (Exception)
+        {
+            // 未打包运行时可能没有可读取的包激活信息。
+            return false;
         }
     }
 

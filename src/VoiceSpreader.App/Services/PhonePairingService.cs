@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
+using VoiceSpreader.App.Models;
 
 namespace VoiceSpreader.App.Services;
 
@@ -23,7 +24,8 @@ public sealed record PhoneDeviceSnapshot(
     double MicrophoneLevelDbfs,
     double ClockDriftPpm,
     int MicrophoneBufferedMilliseconds,
-    DateTimeOffset ConnectedAt)
+    DateTimeOffset ConnectedAt,
+    IReadOnlySet<string>? Capabilities = null)
 {
     public bool SupportsPlayback => Protocol >= 2;
 }
@@ -48,13 +50,19 @@ public sealed class PhoneConnectionChangedEventArgs(
 public sealed class PhoneMicrophoneRequestEventArgs(
     string deviceId,
     string deviceName,
-    bool enabled) : EventArgs
+    bool enabled,
+    long requestId = 0,
+    bool stateApplied = false) : EventArgs
 {
     public string DeviceId { get; } = deviceId;
 
     public string DeviceName { get; } = deviceName;
 
     public bool Enabled { get; } = enabled;
+
+    public long RequestId { get; } = requestId;
+
+    public bool StateApplied { get; } = stateApplied;
 }
 
 public sealed class PhoneMicrophoneErrorEventArgs(
@@ -72,7 +80,11 @@ public sealed class PhoneMicrophoneErrorEventArgs(
 public sealed class PhonePairingService : IDisposable
 {
     private const int DiscoveryPort = 39741;
+    private const int ReconnectPort = 39742;
+    private const int ReconnectAnnouncementCount = 20;
+    private const int ReconnectAnnouncementIntervalMilliseconds = 2_000;
     private const int MaximumFrameBytes = 256 * 1024;
+    private const int MaximumFileFrameBytes = 1024 * 1024;
     private const int MaximumMicrophoneFrameBytes = (int)RemoteSampleRate * sizeof(short) / 5;
     public const int MicrophoneOutputBufferMilliseconds = 60;
     private const uint RemoteSampleRate = 48_000;
@@ -85,6 +97,9 @@ public sealed class PhonePairingService : IDisposable
     private readonly object _sessionsLock = new();
     private readonly Dictionary<string, DeviceSession> _sessions =
         new(StringComparer.OrdinalIgnoreCase);
+    // protocol 3 功能控制可以与旧版音频连接并行存在，避免新功能连接替换正在传输的音频会话。
+    private readonly Dictionary<string, DeviceSession> _featureSessions =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _microphoneSelectionGate = new(1, 1);
     private TcpListener? _listener;
@@ -95,6 +110,9 @@ public sealed class PhonePairingService : IDisposable
     private string? _activeMicrophoneDeviceId;
     private long _microphoneSelectionRevision;
     private long _microphoneControlRevision;
+    private long _microphoneCommandId;
+    private readonly Dictionary<string, FileTransferState> _fileTransfers =
+        new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
 
     public PhonePairingService(
@@ -128,6 +146,26 @@ public sealed class PhonePairingService : IDisposable
 
     public event EventHandler<bool>? PlaybackStreamingChanged;
 
+    public event EventHandler<PhoneInputPointerEventArgs>? InputPointerReceived;
+
+    public event EventHandler<PhoneInputButtonEventArgs>? InputButtonReceived;
+
+    public event EventHandler<PhoneInputScrollEventArgs>? InputScrollReceived;
+
+    public event EventHandler<PhoneInputZoomEventArgs>? InputZoomReceived;
+
+    public event EventHandler<PhoneShortcutEventArgs>? ShortcutReceived;
+
+    public event EventHandler<PhoneFileOfferEventArgs>? FileOfferReceived;
+
+    public event EventHandler<PhoneFileCompleteEventArgs>? FileCompleteReceived;
+
+    public event EventHandler<PhoneScanResultEventArgs>? ScanResultReceived;
+
+    public event EventHandler<PhoneCaptureResultEventArgs>? CaptureResultReceived;
+
+    public Func<IReadOnlyCollection<ComputerShortcut>>? ComputerShortcutsProvider { get; set; }
+
     public IReadOnlyList<string> LocalAddresses { get; private set; }
 
     public string LocalAddress { get; private set; }
@@ -136,7 +174,24 @@ public sealed class PhonePairingService : IDisposable
 
     public string PairingCode => _pairingCode;
 
+    public string PairingSessionId => _sessionId;
+
+    public string PairingSecret => _sessionSecret;
+
     public string PairingPayload => $"VSP1:{LocalAddress}:{ServerPort}:{_sessionId}:{_sessionSecret}";
+
+    public bool RestoreCredentials(string? sessionId, string? secret)
+    {
+        if (!IsCredential(sessionId) || !IsCredential(secret))
+        {
+            GenerateCredentials();
+            return false;
+        }
+
+        _sessionId = sessionId!.ToUpperInvariant();
+        _sessionSecret = secret!.ToUpperInvariant();
+        return true;
+    }
 
     public IReadOnlyList<PhoneDeviceSnapshot> ConnectedDevices
     {
@@ -244,6 +299,67 @@ public sealed class PhonePairingService : IDisposable
         }
 
         StatusChanged?.Invoke(this, $"移动设备互联服务已启动：{LocalAddress}:{ServerPort}");
+        _ = AnnounceReconnectAsync(_lifetime.Token);
+    }
+
+    /// <summary>
+    /// 向已保存的手机地址发送主动重连唤醒包。手机端只会用本地保存的配对密钥完成
+    /// TCP 握手，因此不需要再次扫码或输入配对码。UDP 包重复发送几次以抵抗局域网丢包。
+    /// </summary>
+    public async Task<bool> RequestReconnectAsync(
+        string? remoteAddress,
+        CancellationToken cancellationToken = default)
+    {
+        if (ServerPort is <= 0 or > 65535)
+        {
+            return false;
+        }
+
+        var payload = Encoding.ASCII.GetBytes($"VSP_RECONNECT {_sessionId} {ServerPort}");
+        try
+        {
+            using var sender = new UdpClient(AddressFamily.InterNetwork)
+            {
+                EnableBroadcast = true,
+            };
+            var destinations = new HashSet<IPAddress>();
+            if (!string.IsNullOrWhiteSpace(remoteAddress)
+                && IPAddress.TryParse(remoteAddress, out var destination)
+                && destination.AddressFamily == AddressFamily.InterNetwork)
+            {
+                destinations.Add(destination);
+            }
+            // 保存地址可能已经因 DHCP 变化；同时广播一次，让手机端用 session 找到新的电脑端口。
+            foreach (var broadcast in GetBroadcastAddresses())
+            {
+                destinations.Add(broadcast);
+            }
+            for (var attempt = 0; attempt < 4; attempt++)
+            {
+                foreach (var target in destinations)
+                {
+                    await sender.SendAsync(
+                            payload,
+                            new IPEndPoint(target, ReconnectPort),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                if (attempt + 1 < 4)
+                {
+                    await Task.Delay(350, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (SocketException exception)
+        {
+            StatusChanged?.Invoke(this, $"向手机发送重连请求失败：{exception.Message}");
+            return false;
+        }
     }
 
     public bool SetLocalAddress(string address)
@@ -330,7 +446,7 @@ public sealed class PhonePairingService : IDisposable
             {
                 RaiseMicrophoneStateChanged();
             }
-            return await SendMicrophoneCommandAsync(session, false);
+            return await SendMicrophoneCommandAsync(session, false, force: true);
         }
 
         DeviceSession[] otherSessions;
@@ -389,7 +505,10 @@ public sealed class PhonePairingService : IDisposable
         return false;
     }
 
-    private async Task<bool> SendMicrophoneCommandAsync(DeviceSession session, bool enabled)
+    private async Task<bool> SendMicrophoneCommandAsync(
+        DeviceSession session,
+        bool enabled,
+        bool force = false)
     {
         var revision = Interlocked.Increment(ref session.MicrophoneCommandRevision);
         try
@@ -397,26 +516,41 @@ public sealed class PhonePairingService : IDisposable
             await session.MicrophoneCommandGate.WaitAsync(session.Cancellation.Token);
             try
             {
-                if (revision != Volatile.Read(ref session.MicrophoneCommandRevision))
+                if (!force && revision != Volatile.Read(ref session.MicrophoneCommandRevision))
                 {
                     return true;
                 }
                 // 在发送控制帧前记录期望状态。手机回传类型 2 时，只有匹配该状态
                 // 才是控制确认；不匹配或没有待确认命令则视为手机主动切换。
+                var commandId = Interlocked.Increment(ref _microphoneCommandId);
                 lock (_sessionsLock)
                 {
                     if (IsCurrentSessionLocked(session))
                     {
                         session.MicrophoneCommandPending = true;
                         session.MicrophoneCommandExpectedEnabled = enabled;
+                        session.MicrophoneCommandExpectedId = commandId;
                     }
                 }
                 if (session.Protocol >= 2)
                 {
-                    await SendBinaryFrameAsync(
-                        new byte[] { 10, enabled ? (byte)1 : (byte)0 },
-                        session,
-                        session.Cancellation.Token);
+                    if (session.SupportsMicrophoneSyncRevision)
+                    {
+                        var body = new byte[10];
+                        body[0] = 10;
+                        body[1] = enabled ? (byte)1 : (byte)0;
+                        BinaryPrimitives.WriteUInt64BigEndian(
+                            body.AsSpan(2, sizeof(long)),
+                            unchecked((ulong)commandId));
+                        await SendBinaryFrameAsync(body, session, session.Cancellation.Token);
+                    }
+                    else
+                    {
+                        await SendBinaryFrameAsync(
+                            new byte[] { 10, enabled ? (byte)1 : (byte)0 },
+                            session,
+                            session.Cancellation.Token);
+                    }
                 }
                 else
                 {
@@ -447,6 +581,7 @@ public sealed class PhonePairingService : IDisposable
                 if (IsCurrentSessionLocked(session))
                 {
                     session.MicrophoneCommandPending = false;
+                    session.MicrophoneCommandExpectedId = 0;
                 }
             }
             StatusChanged?.Invoke(this, $"向 {session.Name} 发送麦克风命令失败：{exception.Message}");
@@ -527,6 +662,143 @@ public sealed class PhonePairingService : IDisposable
         }
     }
 
+    /// <summary>
+    /// 让电脑端请求手机打开内置扫码器。请求只发送到已经完成配对的控制通道，
+    /// 具体的摄像头/相册权限仍由 Android 在前台界面中向用户申请。
+    /// </summary>
+    public Task<bool> RequestScanAsync(
+        string deviceId,
+        string mode = "camera",
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedMode = string.Equals(mode, "gallery", StringComparison.OrdinalIgnoreCase)
+            ? "gallery"
+            : "camera";
+        var session = GetSession(deviceId, includeFeatureSession: true);
+        if (session is null || session.Protocol < 3)
+        {
+            StatusChanged?.Invoke(this, "目标手机不支持 v1.2.4 扫码功能");
+            return Task.FromResult(false);
+        }
+
+        var capability = normalizedMode == "gallery" ? "scan.gallery" : "scan.camera";
+        if (!SupportsCapability(session, capability))
+        {
+            StatusChanged?.Invoke(this, $"{session.Name} 尚未声明 {capability} 能力");
+            return Task.FromResult(false);
+        }
+
+        return SendFeatureRequestAsync(
+            session,
+            50,
+            new
+            {
+                requestId = Guid.NewGuid().ToString("N"),
+                mode = normalizedMode,
+                autoOpen = true,
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// 请求手机拍摄一张照片并通过文件通道传回电脑。
+    /// </summary>
+    public Task<bool> RequestCaptureAsync(
+        string deviceId,
+        CancellationToken cancellationToken = default)
+    {
+        var session = GetSession(deviceId, includeFeatureSession: true);
+        if (session is null || session.Protocol < 3)
+        {
+            StatusChanged?.Invoke(this, "目标手机不支持 v1.2.4 拍照传输功能");
+            return Task.FromResult(false);
+        }
+        if (!SupportsCapability(session, "camera.capture"))
+        {
+            StatusChanged?.Invoke(this, $"{session.Name} 尚未声明 camera.capture 能力");
+            return Task.FromResult(false);
+        }
+
+        return SendFeatureRequestAsync(
+            session,
+            60,
+            new
+            {
+                requestId = Guid.NewGuid().ToString("N"),
+                mime = "image/jpeg",
+                quality = 92,
+            },
+            cancellationToken);
+    }
+
+    /// <summary>把 Windows 端已配置的应用白名单同步到手机触摸板。</summary>
+    public void BroadcastComputerShortcuts(IReadOnlyCollection<ComputerShortcut> shortcuts)
+    {
+        DeviceSession[] sessions;
+        lock (_sessionsLock)
+        {
+            sessions = _featureSessions.Values.ToArray();
+        }
+
+        foreach (var session in sessions)
+        {
+            if (!SupportsCapability(session, "input.app"))
+            {
+                continue;
+            }
+
+            _ = SendComputerShortcutCatalogAsync(session, shortcuts);
+        }
+    }
+
+    private static async Task SendComputerShortcutCatalogAsync(
+        DeviceSession session,
+        IReadOnlyCollection<ComputerShortcut> shortcuts)
+    {
+        try
+        {
+            await SendJsonFrameAsync(
+                session,
+                34,
+                new
+                {
+                    apps = shortcuts
+                        .Where(item => !string.IsNullOrWhiteSpace(item.Id)
+                                       && !string.IsNullOrWhiteSpace(item.Name))
+                        .Take(24)
+                        .Select(item => new { id = item.Id, name = item.Name }),
+                },
+                session.Cancellation.Token).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException
+                                          or SocketException
+                                          or ObjectDisposedException
+                                          or OperationCanceledException)
+        {
+            // 控制通道断开时由会话清理和下次连接重新发送目录。
+        }
+    }
+
+    private static async Task<bool> SendFeatureRequestAsync(
+        DeviceSession session,
+        byte type,
+        object payload,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SendJsonFrameAsync(session, type, payload, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException
+                                          or SocketException
+                                          or ObjectDisposedException
+                                          or OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
     public void SetMicrophoneGain(string deviceId, int gainPercent)
     {
         lock (_sessionsLock)
@@ -541,18 +813,35 @@ public sealed class PhonePairingService : IDisposable
 
     public void DisconnectDevice(string deviceId)
     {
-        GetSession(deviceId)?.Stop();
+        DeviceSession? audioSession;
+        DeviceSession? featureSession;
+        lock (_sessionsLock)
+        {
+            _sessions.TryGetValue(deviceId, out audioSession);
+            _featureSessions.TryGetValue(deviceId, out featureSession);
+        }
+        foreach (var session in new[] { audioSession, featureSession }.OfType<DeviceSession>())
+        {
+            NotifyRemoteDisconnect(session);
+            session.DisableAutoReconnect();
+            session.Stop();
+        }
     }
 
-    public void DisconnectPhone()
+    public void DisconnectPhone(bool notifyRemote = true)
     {
         DeviceSession[] sessions;
         lock (_sessionsLock)
         {
-            sessions = [.. _sessions.Values];
+            sessions = [.. _sessions.Values.Concat(_featureSessions.Values)];
         }
         foreach (var session in sessions)
         {
+            if (notifyRemote)
+            {
+                NotifyRemoteDisconnect(session);
+            }
+            session.DisableAutoReconnect();
             session.Stop();
         }
     }
@@ -598,7 +887,11 @@ public sealed class PhonePairingService : IDisposable
                     out var deviceId,
                     out var deviceName,
                     out var protocol,
-                    out var microphoneRequests))
+                    out var microphoneRequests,
+                    out var microphoneSyncRevision,
+                    out var channel,
+                    out var transferId,
+                    out var capabilities))
             {
                 await SendUncoordinatedJsonLineAsync(
                     new { type = "error", message = "移动设备配对凭据不匹配" },
@@ -607,12 +900,31 @@ public sealed class PhonePairingService : IDisposable
                 return;
             }
 
+            if (string.Equals(channel, "file", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleFileChannelAsync(
+                    client,
+                    deviceId,
+                    deviceName,
+                    transferId,
+                    capabilities,
+                    cancellationToken);
+                return;
+            }
+
+            var featureOnly = protocol >= 3
+                               && capabilities.Any(IsFeatureCapability)
+                               && !capabilities.Contains("audio");
+
             deviceSession = new DeviceSession(
                 deviceId,
                 deviceName,
                 (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? string.Empty,
                 protocol,
                 microphoneRequests,
+                microphoneSyncRevision,
+                capabilities,
+                featureOnly,
                 client,
                 CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token));
             await SendJsonLineAsync(
@@ -625,6 +937,8 @@ public sealed class PhonePairingService : IDisposable
                     playbackEnabled = false,
                     multiDevice = true,
                     microphoneRequests = protocol >= 2,
+                    microphoneSyncRevision = protocol >= 2 && microphoneSyncRevision,
+                    capabilities = capabilities.OrderBy(value => value, StringComparer.Ordinal).ToArray(),
                 },
                 deviceSession,
                 cancellationToken);
@@ -632,22 +946,37 @@ public sealed class PhonePairingService : IDisposable
             DeviceSession? replacedSession = null;
             lock (_sessionsLock)
             {
-                if (_sessions.TryGetValue(deviceId, out var existing))
+                var targetSessions = featureOnly ? _featureSessions : _sessions;
+                if (targetSessions.TryGetValue(deviceId, out var existing))
                 {
                     replacedSession = existing;
                 }
-                _sessions[deviceId] = deviceSession;
+                targetSessions[deviceId] = deviceSession;
             }
             replacedSession?.Stop();
-            deviceSession.PlaybackSendTask = PlaybackSendLoopAsync(deviceSession);
-            ConnectionChanged?.Invoke(
-                this,
-                new PhoneConnectionChangedEventArgs(true, deviceName, deviceId));
+            if (!featureOnly)
+            {
+                deviceSession.PlaybackSendTask = PlaybackSendLoopAsync(deviceSession);
+                ConnectionChanged?.Invoke(
+                    this,
+                    new PhoneConnectionChangedEventArgs(true, deviceName, deviceId));
+            }
+            else
+            {
+                // 功能通道建立后立即下发电脑端应用目录，手机无需再次扫描即可显示快捷入口。
+                await SendComputerShortcutCatalogAsync(
+                    deviceSession,
+                    ComputerShortcutsProvider?.Invoke() ?? Array.Empty<ComputerShortcut>());
+            }
             StatusChanged?.Invoke(this, $"移动设备已连接：{deviceName}；音频链路保持关闭。");
-            RaiseDevicesChanged();
+            if (!featureOnly)
+            {
+                RaiseDevicesChanged();
+            }
 
             var lengthBytes = new byte[4];
-            while (!deviceSession.Cancellation.IsCancellationRequested)
+            while (!deviceSession.Cancellation.IsCancellationRequested
+                   && !deviceSession.RemoteDisconnectRequested)
             {
                 if (!await TryReadExactlyAsync(
                         stream,
@@ -689,11 +1018,12 @@ public sealed class PhonePairingService : IDisposable
                 var removed = false;
                 lock (_sessionsLock)
                 {
-                    if (_sessions.TryGetValue(deviceSession.Id, out var current)
+                    var targetSessions = deviceSession.FeatureOnly ? _featureSessions : _sessions;
+                    if (targetSessions.TryGetValue(deviceSession.Id, out var current)
                         && ReferenceEquals(current, deviceSession))
                     {
-                        _sessions.Remove(deviceSession.Id);
-                        if (string.Equals(
+                        targetSessions.Remove(deviceSession.Id);
+                        if (!deviceSession.FeatureOnly && string.Equals(
                                 _activeMicrophoneDeviceId,
                                 deviceSession.Id,
                                 StringComparison.OrdinalIgnoreCase))
@@ -707,16 +1037,26 @@ public sealed class PhonePairingService : IDisposable
                 deviceSession.Stop();
                 if (removed)
                 {
-                    ConnectionChanged?.Invoke(
+                    if (!deviceSession.FeatureOnly)
+                    {
+                        ConnectionChanged?.Invoke(
                         this,
                         new PhoneConnectionChangedEventArgs(
                             false,
                             deviceSession.Name,
                             deviceSession.Id));
+                    }
                     StatusChanged?.Invoke(this, $"移动设备已断开：{deviceSession.Name}");
-                    RaiseDevicesChanged();
-                    RaiseAggregateMicrophoneState();
-                    RaiseAggregatePlaybackState();
+                    if (!deviceSession.FeatureOnly)
+                    {
+                        RaiseDevicesChanged();
+                        RaiseAggregateMicrophoneState();
+                        RaiseAggregatePlaybackState();
+                        if (deviceSession.AutoReconnect)
+                        {
+                            _ = AnnounceReconnectAsync(_lifetime.Token);
+                        }
+                    }
                 }
             }
         }
@@ -728,12 +1068,20 @@ public sealed class PhonePairingService : IDisposable
         out string deviceId,
         out string deviceName,
         out int negotiatedProtocol,
-        out bool microphoneRequests)
+        out bool microphoneRequests,
+        out bool microphoneSyncRevision,
+        out string channel,
+        out string? transferId,
+        out HashSet<string> capabilities)
     {
         deviceId = string.Empty;
         deviceName = string.Empty;
         negotiatedProtocol = 1;
         microphoneRequests = false;
+        microphoneSyncRevision = false;
+        channel = "control";
+        transferId = null;
+        capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             using var document = JsonDocument.Parse(handshake);
@@ -743,7 +1091,7 @@ public sealed class PhonePairingService : IDisposable
                 : 0;
             var valid = root.TryGetProperty("type", out var type)
                         && type.GetString() == "hello"
-                        && protocolValue is 1 or 2
+                        && protocolValue is >= 1 and <= 3
                         && root.TryGetProperty("session", out var session)
                         && string.Equals(session.GetString(), _sessionId, StringComparison.OrdinalIgnoreCase)
                         && root.TryGetProperty("secret", out var secret)
@@ -754,9 +1102,42 @@ public sealed class PhonePairingService : IDisposable
             }
 
             negotiatedProtocol = protocolValue;
+            channel = root.TryGetProperty("channel", out var channelElement)
+                ? channelElement.GetString() ?? "control"
+                : "control";
+            if (!string.Equals(channel, "control", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(channel, "file", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            transferId = root.TryGetProperty("transferId", out var transferElement)
+                ? transferElement.GetString()
+                : null;
+            if (string.Equals(channel, "file", StringComparison.OrdinalIgnoreCase)
+                && (protocolValue < 3 || string.IsNullOrWhiteSpace(transferId)))
+            {
+                return false;
+            }
+            if (root.TryGetProperty("capabilities", out var capabilityElement)
+                && capabilityElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var value in capabilityElement.EnumerateArray())
+                {
+                    var capability = value.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(capability)
+                        && capability.Length <= 64
+                        && capability.All(character => !char.IsControl(character)))
+                    {
+                        capabilities.Add(capability);
+                    }
+                }
+            }
             microphoneRequests = protocolValue >= 2
                                  && root.TryGetProperty("microphoneRequests", out var requestCapability)
                                  && requestCapability.ValueKind == JsonValueKind.True;
+            microphoneSyncRevision = protocolValue >= 2
+                                     && root.TryGetProperty("microphoneSyncRevision", out var syncCapability)
+                                     && syncCapability.ValueKind == JsonValueKind.True;
             deviceName = root.TryGetProperty("deviceName", out var name)
                 ? name.GetString() ?? string.Empty
                 : string.Empty;
@@ -790,21 +1171,39 @@ public sealed class PhonePairingService : IDisposable
     private void ProcessFrame(DeviceSession session, byte[] body)
     {
         session.LastSeen = DateTimeOffset.UtcNow;
+        if (body.Length == 0)
+        {
+            // 空帧只丢弃当前数据，不能因为一个无效输入帧关闭整条控制通道。
+            return;
+        }
+        if (body.Length > 0 && body[0] >= 30)
+        {
+            ProcessFeatureFrame(session, body);
+            return;
+        }
         switch (body[0])
         {
             case 1 when body.Length >= 13:
                 ProcessPcmFrame(session, body);
                 break;
             case 2 when body.Length >= 2:
-                // 这是手机对实际采集结果的确认，只更新状态；主动启停必须使用类型 7 请求帧。
-                UpdateMicrophoneStreaming(session, body[1] != 0);
+                // 类型 2 是手机实际采集状态；新客户端额外回传命令序号，用于丢弃迟到回包。
+                var microphoneStateId = session.SupportsMicrophoneSyncRevision && body.Length >= 10
+                    ? unchecked((long)BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(2, sizeof(long))))
+                    : 0;
+                UpdateMicrophoneStreaming(session, body[1] != 0, microphoneStateId);
                 break;
             case 3:
                 var microphoneError = Encoding.UTF8.GetString(body, 1, body.Length - 1);
                 StatusChanged?.Invoke(
                     this,
                     $"{session.Name} 麦克风：{microphoneError}");
-                UpdateMicrophoneStreaming(session, false);
+                long microphoneErrorStateId;
+                lock (_sessionsLock)
+                {
+                    microphoneErrorStateId = session.MicrophoneCommandExpectedId;
+                }
+                UpdateMicrophoneStreaming(session, false, microphoneErrorStateId);
                 MicrophoneControlFailed?.Invoke(
                     this,
                     new PhoneMicrophoneErrorEventArgs(session.Id, session.Name, microphoneError));
@@ -827,8 +1226,35 @@ public sealed class PhonePairingService : IDisposable
                 break;
             case 7 when session.Protocol >= 2 && body.Length >= 2:
                 var microphoneRouteEnabled = body[1] != 0;
-                if (!microphoneRouteEnabled)
+                var microphoneRequestId = session.SupportsMicrophoneSyncRevision && body.Length >= 10
+                    ? unchecked((long)BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(2, sizeof(long))))
+                    : 0;
+                if (microphoneRequestId > 0)
                 {
+                    lock (_sessionsLock)
+                    {
+                        if (!IsCurrentSessionLocked(session))
+                        {
+                            break;
+                        }
+                        if (microphoneRequestId <= session.LastMicrophoneRequestId)
+                        {
+                            break;
+                        }
+                        session.LastMicrophoneRequestId = microphoneRequestId;
+                    }
+                }
+                // 新客户端的停止是明确的 desired=false。先在服务层收敛 Windows 状态并
+                // 回发带命令编号的停止确认，不能把关键动作完全交给 UI 队列。
+                var stateApplied = !microphoneRouteEnabled && session.Protocol >= 2;
+                if (stateApplied)
+                {
+                    _ = ApplyPhoneMicrophoneStopAsync(session);
+                }
+                if (!session.SupportsMicrophoneSyncRevision && !microphoneRouteEnabled)
+                {
+                    // 旧版客户端没有命令序号，保留停止请求的即时收尾；新客户端由
+                    // Windows 协调器完成一次完整的 desired -> reported 流程。
                     var stateChanged = false;
                     lock (_sessionsLock)
                     {
@@ -858,9 +1284,656 @@ public sealed class PhonePairingService : IDisposable
                     new PhoneMicrophoneRequestEventArgs(
                         session.Id,
                         session.Name,
-                        microphoneRouteEnabled));
+                        microphoneRouteEnabled,
+                        microphoneRequestId,
+                        stateApplied));
+                break;
+            case 13 when body.Length == 1:
+                // 手机主动断开时明确关闭自动重连，避免正常操作触发重连广播。
+                session.DisableAutoReconnect();
+                session.RemoteDisconnectRequested = true;
                 break;
         }
+    }
+
+    private async Task HandleFileChannelAsync(
+        TcpClient client,
+        string deviceId,
+        string deviceName,
+        string? transferId,
+        HashSet<string> capabilities,
+        CancellationToken cancellationToken)
+    {
+        if (!capabilities.Contains("file.send") || string.IsNullOrWhiteSpace(transferId))
+        {
+            return;
+        }
+
+        FileTransferState? transfer;
+        lock (_sessionsLock)
+        {
+            _fileTransfers.TryGetValue(transferId, out transfer);
+        }
+        if (transfer is null
+            || !string.Equals(transfer.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var stream = client.GetStream();
+        await WriteJsonLineAsync(
+            stream,
+            new { type = "accepted", protocol = 3, channel = "file", transferId },
+            cancellationToken).ConfigureAwait(false);
+        var lengthBytes = new byte[4];
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (!await TryReadExactlyAsync(stream, lengthBytes, cancellationToken).ConfigureAwait(false))
+            {
+                break;
+            }
+            var bodyLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBytes);
+            if (bodyLength is < 25 or > MaximumFileFrameBytes)
+            {
+                throw new InvalidDataException("文件数据帧长度无效");
+            }
+            var body = new byte[bodyLength];
+            if (!await TryReadExactlyAsync(stream, body, cancellationToken).ConfigureAwait(false))
+            {
+                break;
+            }
+            if (body[0] != 42)
+            {
+                continue;
+            }
+            await WriteFileChunkAsync(transfer, body, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task WriteFileChunkAsync(
+        FileTransferState transfer,
+        byte[] body,
+        CancellationToken cancellationToken)
+    {
+        var itemId = new Guid(body.AsSpan(1, 16), bigEndian: true).ToString("N");
+        var offset = BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(17, 8));
+        FileItemTransfer? item;
+        lock (_sessionsLock)
+        {
+            transfer.Items.TryGetValue(itemId, out item);
+        }
+        if (item is null || offset != (ulong)item.ReceivedBytes)
+        {
+            throw new InvalidDataException("文件块序号无效");
+        }
+
+        var dataLength = body.Length - 25;
+        if (dataLength <= 0 || offset + (ulong)dataLength > (ulong)item.Size)
+        {
+            throw new InvalidDataException("文件块大小无效");
+        }
+        item.Stream ??= new FileStream(
+            item.PartPath,
+            new FileStreamOptions
+            {
+                Access = FileAccess.Write,
+                Mode = FileMode.OpenOrCreate,
+                Share = FileShare.Read,
+                BufferSize = 1024 * 1024,
+                Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+            });
+        item.Stream.Position = checked((long)offset);
+        await item.Stream.WriteAsync(body.AsMemory(25, dataLength), cancellationToken)
+            .ConfigureAwait(false);
+        item.ReceivedBytes = checked((long)offset + dataLength);
+    }
+
+    private bool TryRegisterFileOffer(
+        DeviceSession session,
+        string payload,
+        out FileTransferState? state)
+    {
+        state = null;
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            var transferId = root.GetProperty("transferId").GetString();
+            if (string.IsNullOrWhiteSpace(transferId) || transferId.Length > 64)
+            {
+                return false;
+            }
+            var itemsElement = root.GetProperty("items");
+            if (itemsElement.ValueKind != JsonValueKind.Array || itemsElement.GetArrayLength() is < 1 or > 64)
+            {
+                return false;
+            }
+
+            var directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Downloads",
+                "VoiceSpreader");
+            Directory.CreateDirectory(directory);
+            var transferState = new FileTransferState(transferId, session.Id, session.Name);
+            foreach (var element in itemsElement.EnumerateArray())
+            {
+                var itemId = element.GetProperty("itemId").GetString();
+                var name = element.GetProperty("name").GetString();
+                var size = element.GetProperty("size").GetInt64();
+                if (!TryNormalizeGuid(itemId, out var normalizedItemId)
+                    || string.IsNullOrWhiteSpace(name)
+                    || size is < 0 or > 16L * 1024 * 1024 * 1024)
+                {
+                    return false;
+                }
+                var safeName = SanitizeFileName(name);
+                var finalPath = GetUniquePath(directory, safeName);
+                transferState.Items[normalizedItemId] = new FileItemTransfer(
+                    normalizedItemId,
+                    safeName,
+                    size,
+                    finalPath,
+                    finalPath + ".vsp-part");
+            }
+            lock (_sessionsLock)
+            {
+                _fileTransfers[transferId] = transferState;
+            }
+            state = transferState;
+            _ = SendFileAcceptAsync(session, transferState);
+            return true;
+        }
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or IOException)
+        {
+            StatusChanged?.Invoke(this, $"文件传输请求无效：{exception.Message}");
+            return false;
+        }
+    }
+
+    private static async Task SendFileAcceptAsync(DeviceSession session, FileTransferState transfer)
+    {
+        var items = transfer.Items.Values.Select(item => new
+        {
+            itemId = item.ItemId,
+            acceptedOffset = File.Exists(item.PartPath) ? new FileInfo(item.PartPath).Length : 0,
+        });
+        await SendJsonFrameAsync(
+            session,
+            41,
+            new { transferId = transfer.TransferId, items },
+            session.Cancellation.Token).ConfigureAwait(false);
+    }
+
+    private void CancelFileTransfer(string deviceId, string transferId)
+    {
+        lock (_sessionsLock)
+        {
+            if (!_fileTransfers.TryGetValue(transferId, out var transfer)
+                || !string.Equals(transfer.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            foreach (var item in transfer.Items.Values)
+            {
+                item.Stream?.Dispose();
+                item.Stream = null;
+            }
+            _fileTransfers.Remove(transferId);
+        }
+    }
+
+    private async Task FinalizeFileTransferAsync(DeviceSession session, string payload)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            var transferId = root.GetProperty("transferId").GetString();
+            var itemId = root.GetProperty("itemId").GetString();
+            var expectedHash = root.GetProperty("sha256").GetString();
+            if (string.IsNullOrWhiteSpace(transferId)
+                || !TryNormalizeGuid(itemId, out var normalizedItemId)
+                || string.IsNullOrWhiteSpace(expectedHash)
+                || expectedHash.Length != 64)
+            {
+                return;
+            }
+            FileTransferState? transfer = null;
+            FileItemTransfer? item = null;
+            lock (_sessionsLock)
+            {
+                _fileTransfers.TryGetValue(transferId, out transfer);
+                transfer?.Items.TryGetValue(normalizedItemId, out item);
+            }
+            if (transfer is null || item is null || item.ReceivedBytes != item.Size)
+            {
+                return;
+            }
+            item.Stream?.Dispose();
+            item.Stream = null;
+            var actualHash = Convert.ToHexString(await SHA256.HashDataAsync(
+                File.OpenRead(item.PartPath),
+                session.Cancellation.Token).ConfigureAwait(false));
+            var valid = string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase);
+            if (valid)
+            {
+                File.Move(item.PartPath, item.FinalPath, overwrite: false);
+            }
+            FileCompleteReceived?.Invoke(
+                this,
+                new PhoneFileCompleteEventArgs(session.Id, session.Name, payload));
+            await SendJsonFrameAsync(
+                session,
+                43,
+                new { transferId, itemId = normalizedItemId, ok = valid, sha256 = actualHash },
+                session.Cancellation.Token).ConfigureAwait(false);
+            if (valid)
+            {
+                lock (_sessionsLock)
+                {
+                    transfer.Items.Remove(normalizedItemId);
+                    if (transfer.Items.Count == 0)
+                    {
+                        _fileTransfers.Remove(transferId);
+                    }
+                }
+            }
+        }
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            StatusChanged?.Invoke(this, $"文件校验失败：{exception.Message}");
+        }
+    }
+
+    private static async Task SendJsonFrameAsync(
+        DeviceSession session,
+        byte type,
+        object payload,
+        CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);
+        var body = new byte[1 + json.Length];
+        body[0] = type;
+        json.CopyTo(body, 1);
+        await SendBinaryFrameAsync(body, session, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task WriteJsonLineAsync(
+        NetworkStream stream,
+        object payload,
+        CancellationToken cancellationToken)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);
+        await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        await stream.WriteAsync("\n"u8.ToArray(), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryNormalizeGuid(string? value, out string normalized)
+    {
+        normalized = string.Empty;
+        return Guid.TryParse(value, out var guid)
+               && AssignNormalizedGuid(guid, out normalized);
+    }
+
+    private static bool AssignNormalizedGuid(Guid value, out string normalized)
+    {
+        normalized = value.ToString("N");
+        return true;
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var name = Path.GetFileName(value.Trim());
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(name.Length);
+        foreach (var character in name)
+        {
+            builder.Append(invalid.Contains(character) || char.IsControl(character) ? '_' : character);
+        }
+        var result = builder.ToString().Trim().TrimEnd('.');
+        return string.IsNullOrWhiteSpace(result) ? "VoiceSpreader-file" : result[..Math.Min(result.Length, 180)];
+    }
+
+    private static string GetUniquePath(string directory, string fileName)
+    {
+        var path = Path.Combine(directory, fileName);
+        if (!File.Exists(path) && !File.Exists(path + ".vsp-part"))
+        {
+            return path;
+        }
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        var extension = Path.GetExtension(fileName);
+        for (var index = 1; index < 10_000; index++)
+        {
+            path = Path.Combine(directory, $"{stem} ({index}){extension}");
+            if (!File.Exists(path) && !File.Exists(path + ".vsp-part"))
+            {
+                return path;
+            }
+        }
+        throw new IOException("无法生成唯一文件名");
+    }
+
+    private void ProcessFeatureFrame(DeviceSession session, byte[] body)
+    {
+        switch (body[0])
+        {
+            case 30:
+                ProcessInputPointerFrame(session, body);
+                break;
+            case 31:
+                ProcessInputButtonFrame(session, body);
+                break;
+            case 32:
+                ProcessInputScrollFrame(session, body);
+                break;
+            case 35:
+                ProcessInputZoomFrame(session, body);
+                break;
+            case 33:
+                ProcessShortcutFrame(session, body);
+                break;
+            case 40:
+                ProcessFileOfferFrame(session, body);
+                break;
+            case 43:
+                ProcessFileCompleteFrame(session, body);
+                break;
+            case 44:
+                ProcessFileCancelFrame(session, body);
+                break;
+            case 51:
+                ProcessScanResultFrame(session, body);
+                break;
+            case 61:
+                ProcessCaptureResultFrame(session, body);
+                break;
+        }
+    }
+
+    private void ProcessInputPointerFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "input.touchpad") || body.Length != 26)
+        {
+            return;
+        }
+        var sequence = BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(1, 4));
+        if (!AcceptInputSequence(session, sequence))
+        {
+            return;
+        }
+        try
+        {
+            InputPointerReceived?.Invoke(
+                this,
+                new PhoneInputPointerEventArgs(
+                    session.Id,
+                    session.Name,
+                    sequence,
+                    BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(5, 8)),
+                    body[13],
+                    BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(14, 4)),
+                    BinaryPrimitives.ReadInt32BigEndian(body.AsSpan(18, 4)),
+                    BinaryPrimitives.ReadInt32BigEndian(body.AsSpan(22, 4))));
+        }
+        catch (Exception exception)
+        {
+            // 输入桥接失败不能关闭手机的功能通道；下一帧仍可继续处理。
+            ReportFeatureInputFailure("处理手机触摸输入失败", exception);
+        }
+    }
+
+    private void ProcessInputButtonFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "input.touchpad") || body.Length != 15)
+        {
+            return;
+        }
+        var sequence = BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(1, 4));
+        if (!AcceptInputSequence(session, sequence))
+        {
+            return;
+        }
+        try
+        {
+            InputButtonReceived?.Invoke(
+                this,
+                new PhoneInputButtonEventArgs(
+                    session.Id,
+                    session.Name,
+                    sequence,
+                    BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(5, 8)),
+                    body[13],
+                    body[14]));
+        }
+        catch (Exception exception)
+        {
+            ReportFeatureInputFailure("处理手机鼠标按键失败", exception);
+        }
+    }
+
+    private void ProcessInputScrollFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "input.touchpad") || body.Length != 21)
+        {
+            return;
+        }
+        var sequence = BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(1, 4));
+        if (!AcceptInputSequence(session, sequence))
+        {
+            return;
+        }
+        try
+        {
+            InputScrollReceived?.Invoke(
+                this,
+                new PhoneInputScrollEventArgs(
+                    session.Id,
+                    session.Name,
+                    sequence,
+                    BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(5, 8)),
+                    BinaryPrimitives.ReadInt32BigEndian(body.AsSpan(13, 4)),
+                    BinaryPrimitives.ReadInt32BigEndian(body.AsSpan(17, 4))));
+        }
+        catch (Exception exception)
+        {
+            ReportFeatureInputFailure("处理手机滚动输入失败", exception);
+        }
+    }
+
+    private void ProcessInputZoomFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "input.touchpad") || body.Length != 17)
+        {
+            return;
+        }
+        var sequence = BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(1, 4));
+        if (!AcceptInputSequence(session, sequence))
+        {
+            return;
+        }
+        try
+        {
+            InputZoomReceived?.Invoke(
+                this,
+                new PhoneInputZoomEventArgs(
+                    session.Id,
+                    session.Name,
+                    sequence,
+                    BinaryPrimitives.ReadUInt64BigEndian(body.AsSpan(5, 8)),
+                    BinaryPrimitives.ReadInt32BigEndian(body.AsSpan(13, 4))));
+        }
+        catch (Exception exception)
+        {
+            ReportFeatureInputFailure("处理手机缩放输入失败", exception);
+        }
+    }
+
+    private void ReportFeatureInputFailure(string message, Exception exception)
+    {
+        try
+        {
+            StatusChanged?.Invoke(this, $"{message}：{exception.Message}");
+        }
+        catch
+        {
+            // 状态通知是辅助信息，不能反过来中断控制通道。
+        }
+    }
+
+    private void ProcessShortcutFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "input.shortcut") || body.Length <= 1 || body.Length > 8193)
+        {
+            return;
+        }
+        ShortcutReceived?.Invoke(
+            this,
+            new PhoneShortcutEventArgs(
+                session.Id,
+                session.Name,
+                Encoding.UTF8.GetString(body, 1, body.Length - 1)));
+    }
+
+    private void ProcessFileOfferFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "file.send") || body.Length <= 1)
+        {
+            return;
+        }
+        var payload = Encoding.UTF8.GetString(body, 1, body.Length - 1);
+        if (!TryRegisterFileOffer(session, payload, out _))
+        {
+            return;
+        }
+        FileOfferReceived?.Invoke(this, new PhoneFileOfferEventArgs(session.Id, session.Name, payload));
+    }
+
+    private void ProcessFileCompleteFrame(DeviceSession session, byte[] body)
+    {
+        if (body.Length <= 1)
+        {
+            return;
+        }
+        _ = FinalizeFileTransferAsync(
+            session,
+            Encoding.UTF8.GetString(body, 1, body.Length - 1));
+    }
+
+    private void ProcessFileCancelFrame(DeviceSession session, byte[] body)
+    {
+        if (body.Length <= 1)
+        {
+            return;
+        }
+        CancelFileTransfer(session.Id, Encoding.UTF8.GetString(body, 1, body.Length - 1));
+    }
+
+    private void ProcessScanResultFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "scan.camera") && !SupportsCapability(session, "scan.gallery"))
+        {
+            return;
+        }
+        if (body.Length <= 1)
+        {
+            return;
+        }
+        ScanResultReceived?.Invoke(
+            this,
+            new PhoneScanResultEventArgs(
+                session.Id,
+                session.Name,
+                Encoding.UTF8.GetString(body, 1, body.Length - 1)));
+    }
+
+    private void ProcessCaptureResultFrame(DeviceSession session, byte[] body)
+    {
+        if (!SupportsCapability(session, "camera.capture") || body.Length <= 1)
+        {
+            return;
+        }
+        CaptureResultReceived?.Invoke(
+            this,
+            new PhoneCaptureResultEventArgs(
+                session.Id,
+                session.Name,
+                Encoding.UTF8.GetString(body, 1, body.Length - 1)));
+    }
+
+    private static bool SupportsCapability(DeviceSession session, string capability) =>
+        (session.Protocol >= 3 && session.Capabilities.Contains(capability))
+        // v1.2.4.3 的基础触摸板复用已认证的音频会话，兼容没有 capability 列表的 protocol 2 手机。
+        || (string.Equals(capability, "input.touchpad", StringComparison.OrdinalIgnoreCase)
+            && !session.FeatureOnly
+            && session.Protocol >= 2);
+
+    private static bool IsFeatureCapability(string capability) =>
+        capability.StartsWith("input.", StringComparison.OrdinalIgnoreCase)
+        || capability.StartsWith("file.", StringComparison.OrdinalIgnoreCase)
+        || capability.StartsWith("scan.", StringComparison.OrdinalIgnoreCase)
+        || capability.StartsWith("camera.", StringComparison.OrdinalIgnoreCase);
+
+    private static bool AcceptInputSequence(DeviceSession session, uint sequence)
+    {
+        lock (session.InputGate)
+        {
+            if (session.HasInputSequence && sequence <= session.LastInputSequence)
+            {
+                return false;
+            }
+            session.LastInputSequence = sequence;
+            session.HasInputSequence = true;
+            return true;
+        }
+    }
+
+    private Task ApplyPhoneMicrophoneStopAsync(DeviceSession session)
+    {
+        try
+        {
+            // 先同步收敛 Windows 本地路由，再等待选择信号量发送确认帧；
+            // 这样 UI 或另一条音频任务阻塞时，手机停止也不会继续显示传输中。
+            var changed = false;
+            lock (_sessionsLock)
+            {
+                if (IsCurrentSessionLocked(session))
+                {
+                    if (IsActiveMicrophoneSessionLocked(session))
+                    {
+                        _activeMicrophoneDeviceId = null;
+                        Interlocked.Increment(ref _microphoneSelectionRevision);
+                    }
+                    session.MicrophoneReportedActive = false;
+                    // 手机主动停止是新的最终意图，立即取消尚未确认的 Windows 启动命令。
+                    // 否则后续到达的旧确认会继续占用“待确认”状态，表现为停止无响应或反复启停。
+                    if (session.MicrophoneCommandExpectedId > session.LastMicrophoneStateId)
+                    {
+                        session.LastMicrophoneStateId = session.MicrophoneCommandExpectedId;
+                    }
+                    session.MicrophoneCommandPending = false;
+                    session.MicrophoneCommandExpectedEnabled = false;
+                    session.MicrophoneCommandExpectedId = 0;
+                    Interlocked.Increment(ref session.MicrophoneCommandRevision);
+                    changed = DeactivateMicrophoneSessionLocked(session);
+                }
+            }
+            if (changed)
+            {
+                RaiseMicrophoneStateChanged();
+            }
+            // 手机已经在本地停止采集并回报了类型 2 状态；这里不要再回发一条
+            // 重复的停止命令，否则它会滞留在 TCP 队列，覆盖手机随后发起的启动请求。
+        }
+        catch (Exception exception) when (exception is IOException
+                                          or SocketException
+                                          or ObjectDisposedException
+                                          or OperationCanceledException)
+        {
+            StatusChanged?.Invoke(this, $"{session.Name} 手机停止请求收尾失败：{exception.Message}");
+        }
+
+        return Task.CompletedTask;
     }
 
     private void ProcessPcmFrame(DeviceSession session, byte[] body)
@@ -940,7 +2013,7 @@ public sealed class PhonePairingService : IDisposable
         }
     }
 
-    private void UpdateMicrophoneStreaming(DeviceSession session, bool enabled)
+    private void UpdateMicrophoneStreaming(DeviceSession session, bool enabled, long stateId)
     {
         bool changed;
         bool acceptedEnabled;
@@ -954,15 +2027,39 @@ public sealed class PhonePairingService : IDisposable
             var wasActiveSession = IsActiveMicrophoneSessionLocked(session);
             var wasReportedActive = session.MicrophoneReportedActive;
             var commandPending = session.MicrophoneCommandPending;
+            if (session.SupportsMicrophoneSyncRevision)
+            {
+                // 新协议的状态回报必须带命令序号。迟到的旧回包不能覆盖新状态，
+                // 也不能清掉正在等待确认的命令。
+                if (stateId == 0
+                    ? commandPending
+                    : stateId <= session.LastMicrophoneStateId
+                      || (commandPending && stateId < session.MicrophoneCommandExpectedId))
+                {
+                    return;
+                }
+                if (stateId > 0)
+                {
+                    session.LastMicrophoneStateId = stateId;
+                }
+            }
             var commandAcknowledged = commandPending
-                                      && session.MicrophoneCommandExpectedEnabled == enabled;
+                                      && session.MicrophoneCommandExpectedEnabled == enabled
+                                      && (!session.SupportsMicrophoneSyncRevision
+                                          || stateId == session.MicrophoneCommandExpectedId);
             // 类型 2 是实际采集状态。为了兼容旧版 Android（没有类型 7 请求帧），
             // 状态发生变化且并非 Windows 命令确认时，补发一个路由请求事件。
             routeRequest = !session.SupportsMicrophoneRequests
                            && !commandAcknowledged
                            && enabled != wasReportedActive
                            && (enabled || wasActiveSession);
-            session.MicrophoneCommandPending = false;
+            if (commandAcknowledged
+                || !session.SupportsMicrophoneSyncRevision
+                || (stateId > 0 && stateId >= session.MicrophoneCommandExpectedId))
+            {
+                session.MicrophoneCommandPending = false;
+                session.MicrophoneCommandExpectedId = 0;
+            }
             session.MicrophoneReportedActive = enabled;
             acceptedEnabled = enabled && IsActiveMicrophoneSessionLocked(session);
             changed = session.MicrophoneStreaming != acceptedEnabled;
@@ -1167,6 +2264,85 @@ public sealed class PhonePairingService : IDisposable
         }
     }
 
+    /// <summary>
+    /// 电脑重启或 TCP 断线后，通过局域网广播唤醒已保存的 Android 设备。
+    /// 广播只携带稳定会话 ID 和当前 TCP 端口，不携带配对密钥；手机仍会用已保存密钥完成 TCP 握手。
+    /// </summary>
+    private async Task AnnounceReconnectAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_sessionId) || ServerPort is <= 0 or > 65535)
+        {
+            return;
+        }
+
+        var payload = Encoding.ASCII.GetBytes($"VSP_RECONNECT {_sessionId} {ServerPort}");
+        try
+        {
+            for (var attempt = 0; attempt < ReconnectAnnouncementCount; attempt++)
+            {
+                using var sender = new UdpClient(AddressFamily.InterNetwork)
+                {
+                    EnableBroadcast = true,
+                };
+                foreach (var destination in GetBroadcastAddresses())
+                {
+                        await sender.SendAsync(
+                            payload,
+                            new IPEndPoint(destination, ReconnectPort),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                if (attempt + 1 < ReconnectAnnouncementCount)
+                {
+                    await Task.Delay(
+                            ReconnectAnnouncementIntervalMilliseconds,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 应用退出时取消广播属于正常生命周期。
+        }
+        catch (SocketException exception)
+        {
+            StatusChanged?.Invoke(this, $"自动重连广播不可用：{exception.Message}");
+        }
+    }
+
+    private static IPAddress[] GetBroadcastAddresses()
+    {
+        var destinations = new HashSet<IPAddress> { IPAddress.Broadcast };
+        foreach (var network in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (network.OperationalStatus != OperationalStatus.Up
+                || network.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+            {
+                continue;
+            }
+
+            foreach (var address in network.GetIPProperties().UnicastAddresses)
+            {
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork
+                    && address.IPv4Mask is not null)
+                {
+                    var ip = address.Address.GetAddressBytes();
+                    var mask = address.IPv4Mask.GetAddressBytes();
+                    var broadcast = new byte[4];
+                    for (var index = 0; index < broadcast.Length; index++)
+                    {
+                        broadcast[index] = (byte)(ip[index] | ~mask[index]);
+                    }
+                    destinations.Add(new IPAddress(broadcast));
+                }
+            }
+        }
+
+        return destinations.ToArray();
+    }
+
     private DeviceSession? GetFirstSession(bool requirePlayback = false)
     {
         lock (_sessionsLock)
@@ -1178,11 +2354,20 @@ public sealed class PhonePairingService : IDisposable
         }
     }
 
-    private DeviceSession? GetSession(string deviceId)
+    private DeviceSession? GetSession(string deviceId, bool includeFeatureSession = false)
     {
         lock (_sessionsLock)
         {
-            return _sessions.TryGetValue(deviceId, out var session) ? session : null;
+            if (includeFeatureSession
+                && _featureSessions.TryGetValue(deviceId, out var featureSession))
+            {
+                return featureSession;
+            }
+            if (_sessions.TryGetValue(deviceId, out var session))
+            {
+                return session;
+            }
+            return null;
         }
     }
 
@@ -1214,7 +2399,8 @@ public sealed class PhonePairingService : IDisposable
                 session.MicrophoneLevelDbfs,
                 session.ClockDriftPpm,
                 session.MicrophoneStreaming ? MicrophoneOutputBufferMilliseconds : 0,
-                session.ConnectedAt))
+                session.ConnectedAt,
+                session.Capabilities))
             .ToArray();
 
     private void RaiseAggregateMicrophoneState() =>
@@ -1335,6 +2521,24 @@ public sealed class PhonePairingService : IDisposable
         }
     }
 
+    private static void NotifyRemoteDisconnect(DeviceSession session)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+            SendBinaryFrameAsync(new byte[] { 13 }, session, timeout.Token)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception exception) when (exception is IOException
+                                          or SocketException
+                                          or ObjectDisposedException
+                                          or OperationCanceledException)
+        {
+            // 连接已经异常时无需重复报告，Stop() 会完成本地清理。
+        }
+    }
+
     private static async Task<string> ReadLineAsync(
         NetworkStream stream,
         int maximumBytes,
@@ -1383,6 +2587,9 @@ public sealed class PhonePairingService : IDisposable
         _pairingCode = RandomNumberGenerator.GetInt32(1_000_000)
             .ToString("D6", CultureInfo.InvariantCulture);
     }
+
+    private static bool IsCredential(string? value) =>
+        value is { Length: 32 } && value.All(Uri.IsHexDigit);
 
     private static string[] GetLocalIpv4Addresses()
     {
@@ -1450,7 +2657,7 @@ public sealed class PhonePairingService : IDisposable
         {
             _systemAudioSource.SystemAudioFrameReady -= SystemAudioSource_FrameReady;
         }
-        DisconnectPhone();
+        DisconnectPhone(notifyRemote: false);
         _listener?.Stop();
         _listener = null;
         _discovery?.Dispose();
@@ -1465,10 +2672,14 @@ public sealed class PhonePairingService : IDisposable
         string remoteAddress,
         int protocol,
         bool supportsMicrophoneRequests,
+        bool supportsMicrophoneSyncRevision,
+        HashSet<string> capabilities,
+        bool featureOnly,
         TcpClient client,
         CancellationTokenSource cancellation)
     {
         private int _stopped;
+        private int _autoReconnect = 1;
 
         public string Id { get; } = id;
 
@@ -1479,6 +2690,18 @@ public sealed class PhonePairingService : IDisposable
         public int Protocol { get; } = protocol;
 
         public bool SupportsMicrophoneRequests { get; } = supportsMicrophoneRequests;
+
+        public bool SupportsMicrophoneSyncRevision { get; } = supportsMicrophoneSyncRevision;
+
+        public HashSet<string> Capabilities { get; } = capabilities;
+
+        public bool FeatureOnly { get; } = featureOnly;
+
+        public object InputGate { get; } = new();
+
+        public bool HasInputSequence { get; set; }
+
+        public uint LastInputSequence { get; set; }
 
         public TcpClient Client { get; } = client;
 
@@ -1498,6 +2721,12 @@ public sealed class PhonePairingService : IDisposable
 
         public bool MicrophoneCommandExpectedEnabled { get; set; }
 
+        public long MicrophoneCommandExpectedId { get; set; }
+
+        public long LastMicrophoneStateId { get; set; }
+
+        public long LastMicrophoneRequestId { get; set; }
+
         public long PlaybackCommandRevision;
 
         public Channel<byte[]> PlaybackFrames { get; } =
@@ -1513,6 +2742,10 @@ public sealed class PhonePairingService : IDisposable
         public DateTimeOffset ConnectedAt { get; } = DateTimeOffset.UtcNow;
 
         public DateTimeOffset LastSeen { get; set; } = DateTimeOffset.UtcNow;
+
+        public bool AutoReconnect => Volatile.Read(ref _autoReconnect) != 0;
+
+        public bool RemoteDisconnectRequested { get; set; }
 
         public bool MicrophoneStreaming { get; set; }
 
@@ -1532,6 +2765,8 @@ public sealed class PhonePairingService : IDisposable
 
         public Task? PlaybackSendTask { get; set; }
 
+        public void DisableAutoReconnect() => Interlocked.Exchange(ref _autoReconnect, 0);
+
         public void Stop()
         {
             if (Interlocked.Exchange(ref _stopped, 1) != 0)
@@ -1542,6 +2777,40 @@ public sealed class PhonePairingService : IDisposable
             Cancellation.Cancel();
             Client.Dispose();
         }
+    }
+
+    private sealed class FileTransferState(string transferId, string deviceId, string deviceName)
+    {
+        public string TransferId { get; } = transferId;
+
+        public string DeviceId { get; } = deviceId;
+
+        public string DeviceName { get; } = deviceName;
+
+        public Dictionary<string, FileItemTransfer> Items { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private sealed class FileItemTransfer(
+        string itemId,
+        string name,
+        long size,
+        string finalPath,
+        string partPath)
+    {
+        public string ItemId { get; } = itemId;
+
+        public string Name { get; } = name;
+
+        public long Size { get; } = size;
+
+        public string FinalPath { get; } = finalPath;
+
+        public string PartPath { get; } = partPath;
+
+        public long ReceivedBytes { get; set; } = File.Exists(partPath) ? new FileInfo(partPath).Length : 0;
+
+        public FileStream? Stream { get; set; }
     }
 
     private sealed class RemoteClockEstimator

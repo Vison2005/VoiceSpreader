@@ -2,8 +2,10 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using WinSystem = Windows.System;
 using VoiceSpreader.App.Models;
 using VoiceSpreader.App.Services;
 
@@ -15,10 +17,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private readonly NativeAudioEngineBridge _engine;
     private readonly BluetoothAudioReceiverService _bluetooth;
     private readonly PhonePairingService _phone;
+    private readonly InputBridgeService _input;
+    private readonly ShortcutService _shortcuts;
     private readonly DispatcherQueue _dispatcher;
     private readonly Dictionary<string, OutputSettings> _savedOutputs;
     private readonly Dictionary<string, PhoneDeviceSettings> _savedPhoneDevices;
+    private readonly List<ComputerShortcut> _computerShortcuts;
     private readonly SemaphoreSlim _settingsSaveGate = new(1, 1);
+    private readonly SemaphoreSlim _autoStartGate = new(1, 1);
     private readonly SemaphoreSlim _phoneMicrophoneRouteGate = new(1, 1);
     private AudioEndpoint? _selectedCapture;
     private AudioEndpoint? _selectedMicrophone;
@@ -52,12 +58,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _isPhonePlaybackRouting;
     private bool _isPhonePlaybackStreaming;
     private bool _isPhonePlaybackRouteBusy;
+    private string _featureStatus = "等待手机端 v1.2.4 功能连接";
+    private string _lastScanResult = string.Empty;
     private string _statusBadge = "已停止";
     private string _statusTitle = "等待配置";
     private string _statusMessage = "选择一个系统声音来源和至少一个输出设备。";
     private string _programLevelText = "节目电平 -- dBFS · 探针暂停";
     private string? _noticeMessage;
     private long _noticeRevision;
+    private DateTime _lastInputFailureAtUtc;
     private long? _calibrationNoticeRevision;
     private long _settingsRevision;
     private long _phoneMicrophoneRouteIntentRevision;
@@ -70,6 +79,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _engine = host.AudioEngine;
         _bluetooth = host.BluetoothAudioReceiver;
         _phone = host.PhonePairing;
+        _input = host.InputBridge;
+        _shortcuts = host.Shortcuts;
         _dispatcher = dispatcher;
         _bufferMilliseconds = host.Settings.BufferMilliseconds;
         _automaticLatencyCompensation = host.Settings.AutomaticLatencyCompensation;
@@ -84,7 +95,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _savedPhoneDevices = new Dictionary<string, PhoneDeviceSettings>(
             host.Settings.PhoneDevices,
             StringComparer.OrdinalIgnoreCase);
+        _computerShortcuts = host.Settings.ComputerShortcuts
+            .Where(item => !string.IsNullOrWhiteSpace(item.Id)
+                           && !string.IsNullOrWhiteSpace(item.Name))
+            .Take(24)
+            .ToList();
+        foreach (var shortcut in _computerShortcuts)
+        {
+            ComputerShortcuts.Add(shortcut);
+        }
+        _phone.ComputerShortcutsProvider = () => _computerShortcuts;
+        RefreshSavedPhoneDevices();
         _startWithWindows = AutoStartService.IsEnabled;
+        _ = RefreshAutoStartAsync();
 
         _engine.StatusChanged += Engine_StatusChanged;
         _engine.ErrorOccurred += Engine_ErrorOccurred;
@@ -104,6 +127,15 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _phone.MicrophoneStreamingChanged += Phone_MicrophoneStreamingChanged;
         _phone.MicrophoneLevelChanged += Phone_MicrophoneLevelChanged;
         _phone.PlaybackStreamingChanged += Phone_PlaybackStreamingChanged;
+        _phone.InputPointerReceived += Phone_InputPointerReceived;
+        _phone.InputButtonReceived += Phone_InputButtonReceived;
+        _phone.InputScrollReceived += Phone_InputScrollReceived;
+        _phone.InputZoomReceived += Phone_InputZoomReceived;
+        _phone.ShortcutReceived += Phone_ShortcutReceived;
+        _phone.FileOfferReceived += Phone_FileOfferReceived;
+        _phone.FileCompleteReceived += Phone_FileCompleteReceived;
+        _phone.ScanResultReceived += Phone_ScanResultReceived;
+        _phone.CaptureResultReceived += Phone_CaptureResultReceived;
 
         try
         {
@@ -114,6 +146,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                                     && _phone.SetLocalAddress(savedAddress)
                 ? savedAddress
                 : _phone.LocalAddress;
+            _ = RequestSavedPhoneReconnectsAsync();
         }
         catch (Exception exception) when (exception is SocketException or InvalidOperationException)
         {
@@ -145,6 +178,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<AudioEndpoint> PhoneMicrophoneOutputs { get; } = [];
 
     public ObservableCollection<PhoneDeviceItem> PhoneDevices { get; } = [];
+
+    public ObservableCollection<SavedPhoneDevice> SavedPhoneDevices { get; } = [];
+
+    public ObservableCollection<ComputerShortcut> ComputerShortcuts { get; } = [];
+
+    public bool HasSavedPhoneDevices => SavedPhoneDevices.Count > 0;
+
+    public bool HasComputerShortcuts => ComputerShortcuts.Count > 0;
+
+    public string ComputerShortcutsText => ComputerShortcuts.Count == 0
+        ? "尚未配置；点击添加应用后，手机触摸板会出现对应入口。"
+        : string.Join("、", ComputerShortcuts.Select(item => item.Name));
 
     public bool IsEngineAvailable => _engine.IsAvailable;
 
@@ -448,6 +493,116 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         private set => SetField(ref _phoneStatus, value);
     }
 
+    /// <summary>
+    /// 手机触摸板、快捷键、扫码和文件传输的聚合状态，供设备互联页面使用。
+    /// </summary>
+    public string FeatureStatus
+    {
+        get => _featureStatus;
+        private set => SetField(ref _featureStatus, value);
+    }
+
+    public string LastScanResult
+    {
+        get => _lastScanResult;
+        private set => SetField(ref _lastScanResult, value);
+    }
+
+    public bool CanRequestPhoneFeatures => PhoneDevices.Count > 0;
+
+    public bool HasScanResult => !string.IsNullOrWhiteSpace(LastScanResult);
+
+    public async Task RequestPhoneScanAsync(string mode = "camera")
+    {
+        var device = PhoneDevices.FirstOrDefault();
+        if (device is null)
+        {
+            FeatureStatus = "请先连接 Android 手机";
+            return;
+        }
+
+        FeatureStatus = mode.Equals("gallery", StringComparison.OrdinalIgnoreCase)
+            ? "正在请求手机从相册选择二维码…"
+            : "正在请求手机打开扫码器…";
+        if (!await _phone.RequestScanAsync(device.Id, mode))
+        {
+        FeatureStatus = "当前版本仅启用全屏触摸板，扫码功能将在后续版本恢复。";
+        }
+    }
+
+    public async Task RequestPhoneCaptureAsync()
+    {
+        var device = PhoneDevices.FirstOrDefault();
+        if (device is null)
+        {
+            FeatureStatus = "请先连接 Android 手机";
+            return;
+        }
+
+        FeatureStatus = "正在请求手机拍摄照片并传回电脑…";
+        if (!await _phone.RequestCaptureAsync(device.Id))
+        {
+        FeatureStatus = "当前版本仅启用全屏触摸板，拍照功能将在后续版本恢复。";
+        }
+    }
+
+    public void ShowFeatureStatus(string status)
+    {
+        FeatureStatus = status;
+        AddActivity(status);
+    }
+
+    public async Task<string?> AddComputerShortcutAsync(string executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath)
+            || !Path.IsPathFullyQualified(executablePath)
+            || !File.Exists(executablePath))
+        {
+            return "请选择仍然存在的 Windows 可执行文件。";
+        }
+
+        var normalizedPath = Path.GetFullPath(executablePath);
+        if (_computerShortcuts.Any(item => string.Equals(
+                Path.GetFullPath(item.ExecutablePath),
+                normalizedPath,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return "这个应用已经添加。";
+        }
+
+        var name = Path.GetFileNameWithoutExtension(normalizedPath);
+        var shortcut = new ComputerShortcut(Guid.NewGuid().ToString("N"), name, normalizedPath);
+        _computerShortcuts.Add(shortcut);
+        ComputerShortcuts.Add(shortcut);
+        OnPropertyChanged(nameof(HasComputerShortcuts));
+        OnPropertyChanged(nameof(ComputerShortcutsText));
+        await SaveComputerShortcutsAsync();
+        _phone.BroadcastComputerShortcuts(_computerShortcuts);
+        FeatureStatus = $"已添加电脑应用：{name}；手机端可直接启动。";
+        return null;
+    }
+
+    public async Task RemoveComputerShortcutAsync(ComputerShortcut shortcut)
+    {
+        if (_computerShortcuts.RemoveAll(item => string.Equals(item.Id, shortcut.Id, StringComparison.OrdinalIgnoreCase)) > 0)
+        {
+            ComputerShortcuts.Remove(shortcut);
+            OnPropertyChanged(nameof(HasComputerShortcuts));
+            OnPropertyChanged(nameof(ComputerShortcutsText));
+            await SaveComputerShortcutsAsync();
+            _phone.BroadcastComputerShortcuts(_computerShortcuts);
+        }
+    }
+
+    private async Task SaveComputerShortcutsAsync()
+    {
+        var settings = _host.Settings with
+        {
+            ComputerShortcuts = _computerShortcuts.ToList(),
+        };
+        await _host.SaveSettingsAsync(settings);
+    }
+
     public double PhoneLevelPercent
     {
         get => _phoneLevelPercent;
@@ -690,7 +845,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private async Task<string?> SetPhoneMicrophoneRouteAsync(
         PhoneDeviceItem? selectedDevice,
         bool enabled,
-        long intentRevision)
+        long intentRevision,
+        bool microphoneCommandAlreadyApplied = false)
     {
         await _phoneMicrophoneRouteGate.WaitAsync();
         if (!IsCurrentPhoneMicrophoneRouteIntent(intentRevision))
@@ -703,11 +859,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (!enabled)
             {
-                if (selectedDevice is not null)
+                if (!microphoneCommandAlreadyApplied && selectedDevice is not null)
                 {
                     await _phone.SetMicrophoneEnabledAsync(selectedDevice.Id, false);
                 }
-                else
+                else if (!microphoneCommandAlreadyApplied)
                 {
                     await _phone.SetMicrophoneEnabledAsync(false);
                 }
@@ -872,11 +1028,46 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public void DisconnectPhoneDevice(string deviceId) => _phone.DisconnectDevice(deviceId);
 
+    public async Task<string?> ReconnectSavedPhoneDeviceAsync(string deviceId)
+    {
+        var saved = SavedPhoneDevices.FirstOrDefault(device =>
+            string.Equals(device.Id, deviceId, StringComparison.OrdinalIgnoreCase));
+        if (saved is null)
+        {
+            return "未找到已保存的手机设备。";
+        }
+        if (PhoneDevices.Any(device =>
+                string.Equals(device.Id, deviceId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return "这台手机已经连接，无需重复连接。";
+        }
+
+        var requested = await _phone.RequestReconnectAsync(saved.RemoteAddress);
+        if (!requested)
+        {
+            return $"无法向 {saved.Name} 发送重连请求，请确认手机仍在同一局域网。";
+        }
+
+        AddActivity($"已向 {saved.Name} 发起主动连接请求");
+        return null;
+    }
+
+    public void ForgetSavedPhoneDevice(string deviceId)
+    {
+        if (!_savedPhoneDevices.Remove(deviceId))
+        {
+            return;
+        }
+        RefreshSavedPhoneDevices();
+        _ = SaveSettingsAsync();
+    }
+
     public void ResetPhonePairing()
     {
         _phone.ResetPairing();
         OnPropertyChanged(nameof(PhonePairingCode));
         OnPropertyChanged(nameof(PhonePairingPayload));
+        _ = SaveSettingsAsync();
     }
 
     public bool StartWithWindows
@@ -889,17 +1080,61 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 return;
             }
 
+            _ = UpdateAutoStartAsync(value);
+        }
+    }
+
+    private async Task RefreshAutoStartAsync()
+    {
+        try
+        {
+            await _autoStartGate.WaitAsync().ConfigureAwait(false);
             try
             {
-                AutoStartService.SetEnabled(value);
-                SetField(ref _startWithWindows, value);
-                AddActivity(value ? "已启用开机自启动" : "已关闭开机自启动");
+                var enabled = await AutoStartService.GetEnabledAsync().ConfigureAwait(false);
+                Dispatch(() => SetField(ref _startWithWindows, enabled));
             }
-            catch (Exception exception)
+            finally
+            {
+                _autoStartGate.Release();
+            }
+        }
+        catch (Exception exception)
+        {
+            Dispatch(() =>
+            {
+                NoticeMessage = $"读取开机自启动状态失败：{exception.Message}";
+                OnPropertyChanged(nameof(StartWithWindows));
+            });
+        }
+    }
+
+    private async Task UpdateAutoStartAsync(bool enabled)
+    {
+        try
+        {
+            await _autoStartGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await AutoStartService.SetEnabledAsync(enabled).ConfigureAwait(false);
+                Dispatch(() =>
+                {
+                    SetField(ref _startWithWindows, enabled);
+                    AddActivity(enabled ? "已启用开机自启动" : "已关闭开机自启动");
+                });
+            }
+            finally
+            {
+                _autoStartGate.Release();
+            }
+        }
+        catch (Exception exception)
+        {
+            Dispatch(() =>
             {
                 NoticeMessage = $"更新开机自启动失败：{exception.Message}";
-                OnPropertyChanged();
-            }
+                OnPropertyChanged(nameof(StartWithWindows));
+            });
         }
     }
 
@@ -1201,6 +1436,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             ExclusiveMode = ExclusiveMode,
             ThemeMode = ThemeMode,
             PhonePairingAddress = SelectedPhoneAddress,
+            PhonePairingSessionId = _phone.PairingSessionId,
+            PhonePairingSecret = _phone.PairingSecret,
             PhoneMicrophoneOutputDeviceId = SelectedPhoneMicrophoneOutput?.Id,
             PhoneMicrophoneOutputVolume = PhoneMicrophoneOutputVolume,
             PhonePlaybackSourceDeviceId = SelectedPhonePlaybackSource?.Id,
@@ -1208,6 +1445,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             PhoneDevices = new Dictionary<string, PhoneDeviceSettings>(
                 _savedPhoneDevices,
                 StringComparer.OrdinalIgnoreCase),
+            ComputerShortcuts = _computerShortcuts.ToList(),
             Outputs = new Dictionary<string, OutputSettings>(_savedOutputs, StringComparer.OrdinalIgnoreCase),
         };
         var revision = Interlocked.Increment(ref _settingsRevision);
@@ -1393,9 +1631,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void Phone_ConnectionChanged(object? sender, PhoneConnectionChangedEventArgs args) => Dispatch(() =>
     {
+        if (!args.Connected)
+        {
+            // 手机断开时无论网络是否完整发送了 UP/CANCEL，都释放电脑端按键和鼠标键。
+            _input.PanicRelease();
+        }
         AddActivity(args.Connected
             ? $"移动设备已连接：{args.PhoneName}"
             : $"移动设备已断开：{args.PhoneName}");
+        if (args.Connected)
+        {
+            _phone.BroadcastComputerShortcuts(_computerShortcuts);
+        }
     });
 
     private void Phone_DevicesChanged(object? sender, PhoneDevicesChangedEventArgs args) =>
@@ -1404,12 +1651,16 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void SyncPhoneDevices(IReadOnlyList<PhoneDeviceSnapshot> snapshots)
     {
         var normalizedMicrophoneSelection = false;
+        var savedDeviceMetadataChanged = false;
         var snapshotIds = snapshots
             .Select(snapshot => snapshot.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var removed in PhoneDevices.Where(device => !snapshotIds.Contains(device.Id)).ToArray())
         {
-            _savedPhoneDevices[removed.Id] = removed.ToSettings();
+            _savedPhoneDevices.TryGetValue(removed.Id, out var previousSettings);
+            var updatedSettings = removed.ToSettings(previousSettings?.LastConnectedAt);
+            savedDeviceMetadataChanged |= SavedDeviceMetadataChanged(previousSettings, updatedSettings);
+            _savedPhoneDevices[removed.Id] = updatedSettings;
             removed.SettingsChanged -= PhoneDevice_SettingsChanged;
             PhoneDevices.Remove(removed);
         }
@@ -1434,13 +1685,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 item = new PhoneDeviceItem(snapshot, settings);
                 item.SettingsChanged += PhoneDevice_SettingsChanged;
                 PhoneDevices.Add(item);
-                _savedPhoneDevices[item.Id] = item.ToSettings();
+                var updatedSettings = item.ToSettings(settings?.LastConnectedAt);
+                savedDeviceMetadataChanged |= SavedDeviceMetadataChanged(
+                    hasSavedSettings ? settings : null,
+                    updatedSettings);
+                _savedPhoneDevices[item.Id] = updatedSettings;
                 _phone.SetMicrophoneGain(item.Id, item.MicrophoneGainPercent);
 
-                if (!hasSavedSettings)
-                {
-                    _ = SaveSettingsAsync();
-                }
                 if (IsPhonePlaybackRouting && item.UseAsSpeaker && item.SupportsPlayback)
                 {
                     _ = _phone.SetPlaybackEnabledAsync(item.Id, true);
@@ -1448,7 +1699,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
             else
             {
+                _savedPhoneDevices.TryGetValue(item.Id, out var previousSettings);
                 item.Update(snapshot);
+                var updatedSettings = item.ToSettings(previousSettings?.LastConnectedAt);
+                if (SavedDeviceMetadataChanged(previousSettings, updatedSettings))
+                {
+                    savedDeviceMetadataChanged = true;
+                    _savedPhoneDevices[item.Id] = updatedSettings;
+                }
             }
         }
 
@@ -1495,9 +1753,59 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
         }
         NotifyPhoneDeviceSelectionChanged();
-        if (normalizedMicrophoneSelection)
+        if (savedDeviceMetadataChanged)
+        {
+            RefreshSavedPhoneDevices();
+            _ = SaveSettingsAsync();
+        }
+        else if (normalizedMicrophoneSelection)
         {
             _ = SaveSettingsAsync();
+        }
+    }
+
+    private void RefreshSavedPhoneDevices()
+    {
+        var saved = _savedPhoneDevices
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Value.Name)
+                           && !string.IsNullOrWhiteSpace(pair.Value.RemoteAddress))
+            .Select(pair => new SavedPhoneDevice(
+                pair.Key,
+                pair.Value.Name!,
+                pair.Value.RemoteAddress!,
+                pair.Value.LastConnectedAt ?? DateTimeOffset.MinValue))
+            .OrderByDescending(device => device.LastConnectedAt)
+            .ToArray();
+        ReplaceCollection(SavedPhoneDevices, saved);
+        OnPropertyChanged(nameof(HasSavedPhoneDevices));
+    }
+
+    private static bool SavedDeviceMetadataChanged(
+        PhoneDeviceSettings? previous,
+        PhoneDeviceSettings current) => previous is null
+                                         || !string.Equals(
+                                             previous.Name,
+                                             current.Name,
+                                             StringComparison.Ordinal)
+                                         || !string.Equals(
+                                             previous.RemoteAddress,
+                                             current.RemoteAddress,
+                                             StringComparison.OrdinalIgnoreCase)
+                                         || previous.LastConnectedAt != current.LastConnectedAt;
+
+    private async Task RequestSavedPhoneReconnectsAsync()
+    {
+        var savedDevices = SavedPhoneDevices.ToArray();
+        // 会话 ID 在 Windows 端持久化；先广播一次，不依赖旧 IP，覆盖 DHCP 换址和旧版本未保存地址的情况。
+        await _phone.RequestReconnectAsync(null).ConfigureAwait(false);
+        foreach (var saved in savedDevices)
+        {
+            if (_disposed || PhoneDevices.Any(device =>
+                    string.Equals(device.Id, saved.Id, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+            await _phone.RequestReconnectAsync(saved.RemoteAddress).ConfigureAwait(false);
         }
     }
 
@@ -1602,7 +1910,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         if (device is null)
         {
             AddActivity($"未找到请求设备 {args.DeviceId}，已拒绝手机麦克风请求");
-            await _phone.SetMicrophoneEnabledAsync(args.DeviceId, false);
+            if (!args.StateApplied)
+            {
+                await _phone.SetMicrophoneEnabledAsync(args.DeviceId, false);
+            }
             return;
         }
 
@@ -1611,7 +1922,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var error = await SetPhoneMicrophoneRouteAsync(
             device,
             args.Enabled,
-            routeIntent);
+            routeIntent,
+            args.StateApplied);
         if (error is null)
         {
             return;
@@ -1655,6 +1967,193 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void Phone_PlaybackStreamingChanged(object? sender, bool enabled) => Dispatch(() =>
     {
         IsPhonePlaybackStreaming = enabled;
+    });
+
+    private void Phone_InputPointerReceived(object? sender, PhoneInputPointerEventArgs args)
+    {
+        try
+        {
+            // 增量单位为 1/1000 像素；限制单帧增量，避免异常手机数据把鼠标瞬移到屏幕外。
+            if (args.Action == 3)
+            {
+                _input.PanicRelease();
+                return;
+            }
+
+            var deltaX = Math.Clamp(args.DeltaX / 1000.0, -240.0, 240.0);
+            var deltaY = Math.Clamp(args.DeltaY / 1000.0, -240.0, 240.0);
+            if (Math.Abs(deltaX) > 0.001 || Math.Abs(deltaY) > 0.001)
+            {
+                if (!_input.Move(deltaX, deltaY))
+                {
+                    ReportInputFailure(
+                        "Windows 未接受鼠标输入",
+                        new InvalidOperationException(
+                            $"SendInput 返回 0（Win32 错误码 {_input.LastNativeError}）。"));
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            ReportInputFailure("触摸输入不可用", exception);
+        }
+    }
+
+    private void Phone_InputButtonReceived(object? sender, PhoneInputButtonEventArgs args)
+    {
+        try
+        {
+            if (args.Button is < 1 or > 5 || args.State is > 1)
+            {
+                return;
+            }
+
+            if (!_input.SetMouseButton(args.Button, args.State == 1))
+            {
+                ReportInputFailure(
+                    "Windows 未接受鼠标按键",
+                    new InvalidOperationException(
+                        $"SendInput 返回 0（Win32 错误码 {_input.LastNativeError}）。"));
+            }
+        }
+        catch (Exception exception)
+        {
+            ReportInputFailure("鼠标按键输入不可用", exception);
+        }
+    }
+
+    private void Phone_InputScrollReceived(object? sender, PhoneInputScrollEventArgs args)
+    {
+        try
+        {
+            var deltaX = Math.Clamp(args.DeltaX / 1000.0, -480.0, 480.0);
+            var deltaY = Math.Clamp(args.DeltaY / 1000.0, -480.0, 480.0);
+            if (!_input.Scroll(deltaX, deltaY))
+            {
+                ReportInputFailure(
+                    "Windows 未接受滚动输入",
+                    new InvalidOperationException(
+                        $"SendInput 返回 0（Win32 错误码 {_input.LastNativeError}）。"));
+            }
+        }
+        catch (Exception exception)
+        {
+            ReportInputFailure("滚动输入不可用", exception);
+        }
+    }
+
+    private void Phone_InputZoomReceived(object? sender, PhoneInputZoomEventArgs args)
+    {
+        try
+        {
+            var delta = Math.Clamp(args.Delta / 1000.0, -4.0, 4.0);
+            if (!_input.Zoom(delta))
+            {
+                ReportInputFailure(
+                    "Windows 未接受缩放输入",
+                    new InvalidOperationException(
+                        $"SendInput 返回 0（Win32 错误码 { _input.LastNativeError }）。"));
+            }
+        }
+        catch (Exception exception)
+        {
+            ReportInputFailure("捏合缩放输入不可用", exception);
+        }
+    }
+
+    private void ReportInputFailure(string message, Exception exception)
+    {
+        try
+        {
+            // 连续触摸帧可能在一秒内产生数百次失败，只提示一次，避免覆盖主界面。
+            var now = DateTime.UtcNow;
+            if (now - _lastInputFailureAtUtc < TimeSpan.FromSeconds(2))
+            {
+                return;
+            }
+            _lastInputFailureAtUtc = now;
+            Dispatch(() => NoticeMessage = $"{message}：{exception.Message}");
+        }
+        catch
+        {
+            // 输入错误是单帧故障，不能影响手机功能通道的持续读取。
+        }
+    }
+
+    private void Phone_ShortcutReceived(object? sender, PhoneShortcutEventArgs args) => Dispatch(() =>
+    {
+        if (_shortcuts.TryExecuteJson(
+                args.Payload,
+                appId => _computerShortcuts.FirstOrDefault(item =>
+                    string.Equals(item.Id, appId, StringComparison.OrdinalIgnoreCase)),
+                out var error))
+        {
+            FeatureStatus = $"已执行手机快捷键（{args.DeviceName}）";
+            AddActivity(FeatureStatus);
+        }
+        else
+        {
+            FeatureStatus = $"快捷键被拒绝：{error}";
+            NoticeMessage = FeatureStatus;
+        }
+    });
+
+    private void Phone_FileOfferReceived(object? sender, PhoneFileOfferEventArgs args) => Dispatch(() =>
+    {
+        FeatureStatus = $"正在接收 {args.DeviceName} 的文件…";
+        AddActivity(FeatureStatus);
+    });
+
+    private void Phone_FileCompleteReceived(object? sender, PhoneFileCompleteEventArgs args) => Dispatch(() =>
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(args.Payload);
+            var name = document.RootElement.TryGetProperty("name", out var nameElement)
+                ? nameElement.GetString()
+                : null;
+            FeatureStatus = string.IsNullOrWhiteSpace(name)
+                ? $"已完成来自 {args.DeviceName} 的文件接收"
+                : $"已接收文件：{name}";
+        }
+        catch (JsonException)
+        {
+            FeatureStatus = $"已完成来自 {args.DeviceName} 的文件接收";
+        }
+        AddActivity(FeatureStatus);
+    });
+
+    private void Phone_ScanResultReceived(object? sender, PhoneScanResultEventArgs args) => Dispatch(async () =>
+    {
+        string? rawValue = null;
+        try
+        {
+            using var document = JsonDocument.Parse(args.Payload);
+            rawValue = document.RootElement.TryGetProperty("rawValue", out var value)
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            // 非 JSON 的旧客户端结果仍然作为文本显示，不自动打开。
+        }
+
+        LastScanResult = rawValue ?? args.Payload;
+        OnPropertyChanged(nameof(HasScanResult));
+        FeatureStatus = $"已收到 {args.DeviceName} 的扫码结果";
+        AddActivity($"扫码结果：{LastScanResult}");
+        if (Uri.TryCreate(rawValue, UriKind.Absolute, out var uri)
+            && (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)
+                || uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)))
+        {
+            await WinSystem.Launcher.LaunchUriAsync(uri);
+        }
+    });
+
+    private void Phone_CaptureResultReceived(object? sender, PhoneCaptureResultEventArgs args) => Dispatch(() =>
+    {
+        FeatureStatus = $"手机照片已准备传输（{args.DeviceName}）";
+        AddActivity(FeatureStatus);
     });
 
     private void AddActivity(string message)
@@ -1719,6 +2218,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(SelectedPhoneSpeakerCount));
         OnPropertyChanged(nameof(PhoneRouteSelectionText));
         OnPropertyChanged(nameof(PhoneConnectionText));
+        OnPropertyChanged(nameof(CanRequestPhoneFeatures));
         NotifyPhoneRouteStateChanged();
         NotifyPhonePlaybackStateChanged();
     }
@@ -1775,6 +2275,17 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _phone.MicrophoneStreamingChanged -= Phone_MicrophoneStreamingChanged;
         _phone.MicrophoneLevelChanged -= Phone_MicrophoneLevelChanged;
         _phone.PlaybackStreamingChanged -= Phone_PlaybackStreamingChanged;
+        _phone.InputPointerReceived -= Phone_InputPointerReceived;
+        _phone.InputButtonReceived -= Phone_InputButtonReceived;
+        _phone.InputScrollReceived -= Phone_InputScrollReceived;
+        _phone.InputZoomReceived -= Phone_InputZoomReceived;
+        _phone.ShortcutReceived -= Phone_ShortcutReceived;
+        _phone.FileOfferReceived -= Phone_FileOfferReceived;
+        _phone.FileCompleteReceived -= Phone_FileCompleteReceived;
+        _phone.ScanResultReceived -= Phone_ScanResultReceived;
+        _phone.CaptureResultReceived -= Phone_CaptureResultReceived;
+        _phone.ComputerShortcutsProvider = null;
+        _input.PanicRelease();
         foreach (var output in Outputs)
         {
             output.SettingsChanged -= Output_SettingsChanged;

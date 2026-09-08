@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = '1.2.1.6',
+    [string]$Version = '1.2.4.72',
     [string]$Publisher = 'CN=Vison2005'
 )
 
@@ -16,7 +16,13 @@ $signingRoot = [IO.Path]::GetFullPath((Join-Path $workspaceRoot '.signing\VoiceS
 $makeAppx = 'D:\Windows Kits\10\bin\10.0.26100.0\x64\makeappx.exe'
 $signTool = 'D:\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe'
 $packageVersion = [Version]$Version
-$releaseVersion = "{0}.{1}.{2}" -f $packageVersion.Major, $packageVersion.Minor, $packageVersion.Build
+$releaseVersion = $Version
+$manifestVersion = if ($packageVersion.Revision -lt 0) {
+    "{0}.{1}.{2}.0" -f $packageVersion.Major, $packageVersion.Minor, $packageVersion.Build
+}
+else {
+    $packageVersion.ToString()
+}
 $packagePath = Join-Path $distRoot "VoiceSpreader-v$releaseVersion-x64.msix"
 $certificatePath = Join-Path $distRoot "VoiceSpreader-v$releaseVersion.cer"
 $pfxPath = Join-Path $signingRoot 'VoiceSpreader-CodeSigning.pfx'
@@ -74,7 +80,7 @@ $namespace = [Xml.XmlNamespaceManager]::new($manifest.NameTable)
 $namespace.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
 $identity = $manifest.SelectSingleNode('/f:Package/f:Identity', $namespace)
 $identity.SetAttribute('Publisher', $Publisher)
-$identity.SetAttribute('Version', $Version)
+$identity.SetAttribute('Version', $manifestVersion)
 $manifest.Save((Join-Path $stagingRoot 'AppxManifest.xml'))
 
 if (-not (Test-Path -LiteralPath $pfxPath)) {
@@ -161,7 +167,18 @@ if (-not $hasCodeSigningEku -or -not $certificateIsSelfSigned -or -not $certific
 
 $hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText("$packagePath.sha256", "$hash  $([IO.Path]::GetFileName($packagePath))`n")
-Copy-Item (Join-Path $PSScriptRoot 'INSTALL.md') (Join-Path $distRoot 'WINDOWS-INSTALL.md') -Force
+$installTemplate = Get-Content (Join-Path $PSScriptRoot 'INSTALL.md') -Raw -Encoding UTF8
+$installContent = $installTemplate.Replace('{{VERSION}}', $releaseVersion)
+[IO.File]::WriteAllText(
+    (Join-Path $distRoot 'WINDOWS-INSTALL.md'),
+    $installContent,
+    [Text.UTF8Encoding]::new($false))
+$installScriptTemplate = Get-Content (Join-Path $PSScriptRoot 'Install VoiceSpreader.cmd') -Raw -Encoding UTF8
+$installScriptContent = $installScriptTemplate.Replace('{{VERSION}}', $releaseVersion)
+[IO.File]::WriteAllText(
+    (Join-Path $distRoot 'Install VoiceSpreader.cmd'),
+    $installScriptContent,
+    [Text.UTF8Encoding]::new($false))
 
 Write-Host "Windows release package: $packagePath"
 Write-Host "Public certificate: $certificatePath"

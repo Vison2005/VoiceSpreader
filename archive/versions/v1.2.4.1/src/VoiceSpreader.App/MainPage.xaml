@@ -1,0 +1,1422 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="VoiceSpreader.App.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:models="using:VoiceSpreader.App.Models"
+    Background="{ThemeResource VoicePageBrush}"
+    Loaded="Page_Loaded"
+    Unloaded="Page_Unloaded"
+    mc:Ignorable="d">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ScrollViewer
+            x:Name="PageScrollViewer"
+            HorizontalScrollBarVisibility="Disabled"
+            HorizontalScrollMode="Disabled"
+            VerticalScrollBarVisibility="Auto">
+            <Grid
+                x:Name="PageRoot"
+                MaxWidth="1280"
+                Padding="24,18,24,12"
+                HorizontalAlignment="Stretch"
+                SizeChanged="PageRoot_SizeChanged"
+                Tapped="PageRoot_Tapped">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                <Grid Margin="0,0,0,16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center" Spacing="2">
+                        <TextBlock
+                            x:Name="WorkspaceTitle"
+                            FontFamily="Segoe UI Variable Display, Segoe UI"
+                            FontSize="26"
+                            FontWeight="SemiBold"
+                            Text="同步控制台" />
+                        <TextBlock
+                            x:Name="WorkspaceSubtitle"
+                            Foreground="{ThemeResource VoiceMutedTextBrush}"
+                            Text="将系统声音同步到多个 Windows 音频设备" />
+                        <SelectorBar
+                            x:Name="WorkspaceSelector"
+                            Margin="0,8,0,0"
+                            SelectionChanged="WorkspaceSelector_SelectionChanged">
+                            <SelectorBarItem Text="同步控制" />
+                            <SelectorBarItem Text="设备互联" />
+                        </SelectorBar>
+                    </StackPanel>
+
+                    <StackPanel
+                        Grid.Column="1"
+                        VerticalAlignment="Center"
+                        Orientation="Horizontal"
+                        Spacing="8">
+                        <ProgressRing
+                            Width="20"
+                            Height="20"
+                            Margin="0,0,4,0"
+                            IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                        <Button
+                            AutomationProperties.Name="连接移动设备"
+                            Style="{StaticResource VoiceIconButtonStyle}">
+                            <SymbolIcon Symbol="Phone" />
+                            <Button.Flyout>
+                                <Flyout Opening="PhoneFlyout_Opening">
+                                    <StackPanel Width="360" Spacing="14">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="添加移动设备" />
+                                            <TextBlock
+                                                FontSize="12"
+                                                Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                Text="在 Android 客户端输入六位配对码" />
+                                        </StackPanel>
+                                        <Border Padding="16,12" Style="{StaticResource VoiceCardStyle}">
+                                            <Grid ColumnSpacing="14">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="132" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <Border
+                                                    Width="132"
+                                                    Height="132"
+                                                    Background="White"
+                                                    CornerRadius="4">
+                                                    <Image
+                                                        x:Name="PhoneQrImage"
+                                                        Width="124"
+                                                        Height="124"
+                                                        Stretch="Uniform" />
+                                                </Border>
+                                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="6">
+                                                    <TextBlock
+                                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                        Text="或输入配对码" />
+                                                    <TextBlock
+                                                        FontFamily="Cascadia Mono, Consolas"
+                                                        FontSize="28"
+                                                        FontWeight="SemiBold"
+                                                        Text="{x:Bind ViewModel.PhonePairingCode, Mode=OneWay}" />
+                                                    <TextBlock
+                                                        FontSize="12"
+                                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                        Text="{x:Bind ViewModel.PhoneConnectionText, Mode=OneWay}"
+                                                        TextWrapping="Wrap" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
+                                        <ComboBox
+                                            Header="电脑地址"
+                                            HorizontalAlignment="Stretch"
+                                            ItemsSource="{x:Bind ViewModel.PhoneAddresses, Mode=OneWay}"
+                                            SelectedItem="{x:Bind ViewModel.SelectedPhoneAddress, Mode=TwoWay}"
+                                            SelectionChanged="PhoneAddress_SelectionChanged" />
+                                        <StackPanel Spacing="5">
+                                            <ProgressBar
+                                                Height="4"
+                                                Maximum="100"
+                                                Value="{x:Bind ViewModel.PhoneLevelPercent, Mode=OneWay}" />
+                                            <TextBlock
+                                                FontSize="12"
+                                                Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                Text="{x:Bind ViewModel.PhoneStatus, Mode=OneWay}"
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <Grid ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Button Click="ResetPhonePairingButton_Click" Content="更换配对码" />
+                                            <Button
+                                                Grid.Column="1"
+                                                MinWidth="118"
+                                                Click="OpenDeviceLinkButton_Click"
+                                                Content="管理设备"
+                                                Style="{StaticResource AccentButtonStyle}" />
+                                        </Grid>
+                                        <Button
+                                            HorizontalAlignment="Left"
+                                            Click="DisconnectPhoneButton_Click"
+                                            Content="断开全部设备"
+                                            IsEnabled="{x:Bind ViewModel.IsPhoneConnected, Mode=OneWay}" />
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="连接移动设备" />
+                            </ToolTipService.ToolTip>
+                        </Button>
+
+                        <Button
+                            AutomationProperties.Name="蓝牙音频接收"
+                            Style="{StaticResource VoiceIconButtonStyle}">
+                            <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE702;" />
+                            <Button.Flyout>
+                                <Flyout Opening="BluetoothFlyout_Opening">
+                                    <StackPanel Width="360" Spacing="14">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Spacing="2">
+                                                <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="蓝牙音频接收" />
+                                                <TextBlock
+                                                    FontSize="12"
+                                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                    Text="让 Windows 接收已配对手机的媒体声音" />
+                                            </StackPanel>
+                                            <ProgressRing
+                                                Grid.Column="1"
+                                                Width="22"
+                                                Height="22"
+                                                IsActive="{x:Bind ViewModel.IsBluetoothBusy, Mode=OneWay}" />
+                                        </Grid>
+                                        <ListView
+                                            MaxHeight="240"
+                                            ItemsSource="{x:Bind ViewModel.BluetoothDevices, Mode=OneWay}"
+                                            SelectedItem="{x:Bind ViewModel.SelectedBluetoothDevice, Mode=TwoWay}"
+                                            SelectionMode="Single">
+                                            <ListView.ItemTemplate>
+                                                <DataTemplate x:DataType="models:BluetoothAudioDevice">
+                                                    <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
+                                                </DataTemplate>
+                                            </ListView.ItemTemplate>
+                                        </ListView>
+                                        <TextBlock
+                                            FontSize="12"
+                                            Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                            Text="{x:Bind ViewModel.BluetoothStatus, Mode=OneWay}"
+                                            TextWrapping="Wrap" />
+                                        <Grid ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <Button
+                                                Click="RefreshBluetoothButton_Click"
+                                                Content="刷新设备"
+                                                IsEnabled="{x:Bind ViewModel.IsBluetoothIdle, Mode=OneWay}" />
+                                            <Button
+                                                Grid.Column="1"
+                                                Click="PairBluetoothButton_Click"
+                                                Content="配对新设备" />
+                                            <Button
+                                                Grid.Column="2"
+                                                MinWidth="138"
+                                                Click="BluetoothActionButton_Click"
+                                                Content="{x:Bind ViewModel.BluetoothActionText, Mode=OneWay}"
+                                                IsEnabled="{x:Bind ViewModel.IsBluetoothIdle, Mode=OneWay}"
+                                                Style="{StaticResource AccentButtonStyle}" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="蓝牙音频接收" />
+                            </ToolTipService.ToolTip>
+                        </Button>
+
+                        <Button
+                            AutomationProperties.Name="应用设置"
+                            Style="{StaticResource VoiceIconButtonStyle}">
+                            <SymbolIcon Symbol="Setting" />
+                            <Button.Flyout>
+                                <Flyout>
+                                    <StackPanel Width="320" Spacing="18">
+                                        <StackPanel Spacing="2">
+                                            <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="应用设置" />
+                                            <TextBlock
+                                                FontSize="12"
+                                                Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                Text="外观与后台运行" />
+                                        </StackPanel>
+                                        <StackPanel Spacing="8">
+                                            <TextBlock FontWeight="SemiBold" Text="界面主题" />
+                                            <SelectorBar
+                                                x:Name="ThemeSelector"
+                                                HorizontalAlignment="Stretch"
+                                                SelectionChanged="ThemeSelector_SelectionChanged">
+                                                <SelectorBarItem Text="跟随系统" />
+                                                <SelectorBarItem Text="浅色" />
+                                                <SelectorBarItem Text="深色" />
+                                                <SelectorBarItem Text="极暗" />
+                                            </SelectorBar>
+                                        </StackPanel>
+                                        <Border BorderBrush="{ThemeResource VoiceStrokeBrush}" BorderThickness="0,1,0,0" />
+                                        <Grid ColumnSpacing="12">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                                <TextBlock FontWeight="SemiBold" Text="开机自启动" />
+                                                <TextBlock
+                                                    FontSize="12"
+                                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                    Text="登录 Windows 后自动运行" />
+                                            </StackPanel>
+                                            <ToggleSwitch
+                                                Grid.Column="1"
+                                                MinWidth="44"
+                                                VerticalAlignment="Center"
+                                                OffContent=""
+                                                OnContent=""
+                                                IsOn="{x:Bind ViewModel.StartWithWindows, Mode=TwoWay}" />
+                                        </Grid>
+                                        <Button
+                                            HorizontalAlignment="Stretch"
+                                            HorizontalContentAlignment="Left"
+                                            Click="MinimizeToTrayButton_Click">
+                                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                                <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE921;" />
+                                                <TextBlock Text="最小化到系统托盘" />
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="应用设置" />
+                            </ToolTipService.ToolTip>
+                        </Button>
+
+                        <Button
+                            AutomationProperties.Name="刷新音频设备"
+                            Click="RefreshButton_Click"
+                            IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                            Style="{StaticResource VoiceIconButtonStyle}">
+                            <SymbolIcon Symbol="Refresh" />
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="刷新音频设备" />
+                            </ToolTipService.ToolTip>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+
+                <InfoBar
+                    Grid.Row="1"
+                    Margin="0,0,0,14"
+                    IsClosable="False"
+                    IsOpen="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                    Message="{x:Bind ViewModel.NoticeMessage, Mode=OneWay}"
+                    Severity="Warning"
+                    Title="需要注意" />
+
+                <Grid x:Name="WorkspaceGrid" Grid.Row="2" ColumnSpacing="16" RowSpacing="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="PrimaryColumn" Width="*" />
+                        <ColumnDefinition x:Name="SecondaryColumn" Width="340" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid x:Name="PrimaryContentColumn">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="16" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Border
+                            x:Name="AudioSourceCard"
+                            Padding="18,16"
+                            Style="{StaticResource VoiceCardStyle}">
+                            <StackPanel Spacing="14">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="音频来源" />
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Text="输入与校准" />
+                                </Grid>
+                                <Grid ColumnSpacing="14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Spacing="6">
+                                        <TextBlock Foreground="{ThemeResource VoiceMutedTextBrush}" Text="系统声音" />
+                                        <ComboBox
+                                            HorizontalAlignment="Stretch"
+                                            IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                                            ItemsSource="{x:Bind ViewModel.CaptureSources, Mode=OneWay}"
+                                            DisplayMemberPath="DisplayName"
+                                            SelectedItem="{x:Bind ViewModel.SelectedCapture, Mode=TwoWay}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="6">
+                                        <TextBlock Foreground="{ThemeResource VoiceMutedTextBrush}" Text="校准麦克风" />
+                                        <ComboBox
+                                            HorizontalAlignment="Stretch"
+                                            IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                                            ItemsSource="{x:Bind ViewModel.Microphones, Mode=OneWay}"
+                                            DisplayMemberPath="DisplayName"
+                                            SelectedItem="{x:Bind ViewModel.SelectedMicrophone, Mode=TwoWay}" />
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border
+                            x:Name="OutputDevicesCard"
+                            Grid.Row="2"
+                            Padding="18,16"
+                            Style="{StaticResource VoiceCardStyle}">
+                            <StackPanel Spacing="10">
+                                <Grid Margin="0,0,0,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="输出设备" />
+                                        <TextBlock
+                                            FontSize="12"
+                                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                            Text="运行中可实时微调；负值表示相对提前" />
+                                    </StackPanel>
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource VoiceMutedTextBrush}">
+                                        <Run Text="{x:Bind ViewModel.SelectedOutputs.Count, Mode=OneWay}" />
+                                        <Run Text=" 个已选择" />
+                                    </TextBlock>
+                                </Grid>
+                                <Grid MinHeight="26" Padding="8,0" ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="32" />
+                                        <ColumnDefinition Width="28" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="128" />
+                                        <ColumnDefinition Width="88" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="2" FontSize="11" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="设备" />
+                                    <TextBlock Grid.Column="3" HorizontalAlignment="Center" FontSize="11" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="音量" />
+                                    <TextBlock Grid.Column="4" HorizontalAlignment="Center" FontSize="11" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="相对补偿 ms" />
+                                </Grid>
+                                <ListView
+                                    x:Name="OutputDeviceList"
+                                    MaxHeight="390"
+                                    IsItemClickEnabled="False"
+                                    ItemsSource="{x:Bind ViewModel.Outputs, Mode=OneWay}"
+                                    SelectionMode="None"
+                                    SizeChanged="AdaptiveColumn_SizeChanged"
+                                    ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="MinHeight" Value="66" />
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="Margin" Value="0,0,0,2" />
+                                            <Setter Property="CornerRadius" Value="4" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="models:OutputEndpointItem">
+                                            <Grid MinHeight="66" Padding="8,4" ColumnSpacing="10">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="32" />
+                                                    <ColumnDefinition Width="28" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="128" />
+                                                    <ColumnDefinition Width="88" />
+                                                </Grid.ColumnDefinitions>
+                                                <CheckBox
+                                                    VerticalAlignment="Center"
+                                                    AutomationProperties.Name="选择输出设备"
+                                                    Click="OutputCheckBox_Click"
+                                                    IsEnabled="{x:Bind SelectionEnabled, Mode=OneWay}"
+                                                    IsChecked="{x:Bind IsSelected, Mode=OneWay}" />
+                                                <FontIcon
+                                                    Grid.Column="1"
+                                                    VerticalAlignment="Center"
+                                                    FontFamily="Segoe Fluent Icons"
+                                                    FontSize="16"
+                                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                    Glyph="&#xE767;" />
+                                                <StackPanel Grid.Column="2" MinWidth="130" VerticalAlignment="Center" Spacing="2">
+                                                    <TextBlock FontWeight="SemiBold" Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        FontSize="11"
+                                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                        Text="{x:Bind CorrectionText, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                                <Slider
+                                                    Grid.Column="3"
+                                                    VerticalAlignment="Center"
+                                                    AutomationProperties.Name="输出音量"
+                                                    Maximum="100"
+                                                    Minimum="0"
+                                                    IsEnabled="{x:Bind AdjustmentsEnabled, Mode=OneWay}"
+                                                    StepFrequency="1"
+                                                    Value="{x:Bind VolumePercent, Mode=OneWay}"
+                                                    ValueChanged="OutputVolumeSlider_ValueChanged" />
+                                                <StackPanel Grid.Column="4" VerticalAlignment="Center" Spacing="2">
+                                                    <NumberBox
+                                                        AutomationProperties.Name="手动相对补偿毫秒"
+                                                        Maximum="500"
+                                                        Minimum="-500"
+                                                        IsEnabled="{x:Bind AdjustmentsEnabled, Mode=OneWay}"
+                                                        KeyDown="OutputDelayNumberBox_KeyDown"
+                                                        LostFocus="OutputDelayNumberBox_LostFocus"
+                                                        PointerWheelChanged="OutputDelayNumberBox_PointerWheelChanged"
+                                                        SmallChange="1"
+                                                        SpinButtonPlacementMode="Compact"
+                                                        Value="{x:Bind DelayMilliseconds, Mode=OneWay}"
+                                                        ValueChanged="OutputDelayNumberBox_ValueChanged" />
+                                                    <TextBlock
+                                                        HorizontalAlignment="Right"
+                                                        FontFamily="Segoe UI Variable Text, Segoe UI"
+                                                        FontSize="11"
+                                                        FontWeight="SemiBold"
+                                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                        Text="{x:Bind AutomaticDelayDisplay, Mode=OneWay}" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <Grid
+                        x:Name="StatusColumn"
+                        Grid.Column="1"
+                        SizeChanged="AdaptiveColumn_SizeChanged">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="16" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Border
+                            x:Name="SyncStatusCard"
+                            Padding="18,16"
+                            Style="{StaticResource VoiceCardStyle}">
+                            <StackPanel Spacing="12">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="同步状态" />
+                                    <Border
+                                        Grid.Column="1"
+                                        Padding="8,3"
+                                        Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                                        CornerRadius="6">
+                                        <TextBlock FontSize="12" FontWeight="SemiBold" Text="{x:Bind ViewModel.StatusBadge, Mode=OneWay}" />
+                                    </Border>
+                                </Grid>
+                                <StackPanel Spacing="3">
+                                    <TextBlock
+                                        FontFamily="Segoe UI Variable Display, Segoe UI"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="{x:Bind ViewModel.StatusTitle, Mode=OneWay}"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        FontSize="13"
+                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                        Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border BorderBrush="{ThemeResource VoiceStrokeBrush}" BorderThickness="0,1,0,0" />
+                                <TextBlock FontSize="11" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="当前输出" />
+                                <ScrollViewer
+                                    MaxHeight="102"
+                                    HorizontalScrollBarVisibility="Disabled"
+                                    HorizontalScrollMode="Disabled"
+                                    VerticalScrollBarVisibility="Auto"
+                                    VerticalScrollMode="Enabled">
+                                    <ItemsControl ItemsSource="{x:Bind ViewModel.SelectedOutputs, Mode=OneWay}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:OutputEndpointItem">
+                                                <Grid MinHeight="34" ColumnSpacing="8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="20" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <FontIcon
+                                                        VerticalAlignment="Center"
+                                                        FontFamily="Segoe Fluent Icons"
+                                                        FontSize="13"
+                                                        Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                                        Glyph="&#xE767;" />
+                                                    <TextBlock
+                                                        Grid.Column="1"
+                                                        VerticalAlignment="Center"
+                                                        FontSize="12"
+                                                        Text="{x:Bind Name}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        Grid.Column="2"
+                                                        VerticalAlignment="Center"
+                                                        FontFamily="Cascadia Mono, Consolas"
+                                                        FontSize="11"
+                                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                        Text="{x:Bind EffectiveDelayDisplay, Mode=OneWay}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </ScrollViewer>
+                                <TextBlock
+                                    FontFamily="Cascadia Mono, Consolas"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                    Text="{x:Bind ViewModel.ProgramLevelText, Mode=OneWay}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border
+                            x:Name="SyncControlCard"
+                            Grid.Row="2"
+                            Padding="18,16"
+                            Style="{StaticResource VoiceCardStyle}">
+                            <StackPanel Spacing="7">
+                                <TextBlock Margin="0,0,0,4" Style="{StaticResource VoiceSectionTitleStyle}" Text="同步控制" />
+                                <Grid MinHeight="52" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="92" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Spacing="2">
+                                        <TextBlock FontWeight="SemiBold" Text="全局延迟" />
+                                        <TextBlock FontSize="12" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="播放中可实时调整" />
+                                    </StackPanel>
+                                    <NumberBox
+                                        x:Name="BufferNumberBox"
+                                        Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        Maximum="100"
+                                        Minimum="2"
+                                        IsEnabled="{x:Bind ViewModel.AdjustmentsEnabled, Mode=OneWay}"
+                                        KeyDown="BufferNumberBox_KeyDown"
+                                        LostFocus="BufferNumberBox_LostFocus"
+                                        PointerWheelChanged="BufferNumberBox_PointerWheelChanged"
+                                        SmallChange="1"
+                                        SpinButtonPlacementMode="Compact"
+                                        Value="{x:Bind ViewModel.BufferMilliseconds, Mode=OneWay}"
+                                        ValueChanged="BufferNumberBox_ValueChanged" />
+                                </Grid>
+                                <Border BorderBrush="{ThemeResource VoiceStrokeBrush}" BorderThickness="0,1,0,0" />
+                                <Grid MinHeight="46" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                                        <TextBlock FontWeight="SemiBold" Text="端点自动补偿" />
+                                        <TextBlock FontSize="11" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="使用测得延迟自动对齐" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        Grid.Column="1"
+                                        MinWidth="44"
+                                        VerticalAlignment="Center"
+                                        IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                                        IsOn="{x:Bind ViewModel.AutomaticLatencyCompensation, Mode=TwoWay}"
+                                        OffContent=""
+                                        OnContent="" />
+                                </Grid>
+                                <Grid MinHeight="46" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                                        <TextBlock FontWeight="SemiBold" Text="声学跟踪" />
+                                        <TextBlock FontSize="11" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="持续检测设备间漂移" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        Grid.Column="1"
+                                        MinWidth="44"
+                                        VerticalAlignment="Center"
+                                        IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                                        IsOn="{x:Bind ViewModel.ContinuousAcousticTracking, Mode=TwoWay}"
+                                        OffContent=""
+                                        OnContent="" />
+                                </Grid>
+                                <Grid MinHeight="46" ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                                        <TextBlock FontWeight="SemiBold" Text="独占输出" />
+                                        <TextBlock FontSize="11" Foreground="{ThemeResource VoiceSubtleTextBrush}" Text="由本应用独占音频设备" />
+                                    </StackPanel>
+                                    <ToggleSwitch
+                                        Grid.Column="1"
+                                        MinWidth="44"
+                                        VerticalAlignment="Center"
+                                        IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                                        IsOn="{x:Bind ViewModel.ExclusiveMode, Mode=TwoWay}"
+                                        OffContent=""
+                                        OnContent="" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Grid>
+
+                <Grid
+                    x:Name="DeviceLinkWorkspace"
+                    Grid.Row="2"
+                    ColumnSpacing="16"
+                    RowSpacing="16"
+                    Visibility="Collapsed">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="DeviceLinkPrimaryColumn" Width="*" />
+                        <ColumnDefinition x:Name="DeviceLinkSecondaryColumn" Width="340" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Border Padding="18,16" Style="{StaticResource VoiceCardStyle}">
+                        <Grid RowSpacing="12">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="已连接设备" />
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Text="每台设备使用独立的 Wi-Fi 音频链路" />
+                                </StackPanel>
+                                <Border
+                                    Grid.Column="1"
+                                    MinWidth="72"
+                                    Height="28"
+                                    Padding="10,0"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Center"
+                                    Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                                    CornerRadius="6">
+                                    <TextBlock
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        FontSize="12"
+                                        FontWeight="SemiBold"
+                                        Text="{x:Bind ViewModel.ConnectedPhoneDeviceCountText, Mode=OneWay}"
+                                        TextAlignment="Center" />
+                                </Border>
+                            </Grid>
+
+                            <Grid Grid.Row="1" MinHeight="82" MaxHeight="250">
+                                <ListView
+                                    IsItemClickEnabled="False"
+                                    ItemsSource="{x:Bind ViewModel.PhoneDevices, Mode=OneWay}"
+                                    SelectionMode="None">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="Margin" Value="0,0,0,4" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="models:PhoneDeviceItem">
+                                            <Grid MinHeight="64" Padding="8,6" ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="28" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="150" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <FontIcon
+                                                    VerticalAlignment="Center"
+                                                    FontFamily="Segoe Fluent Icons"
+                                                    FontSize="17"
+                                                    Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                                    Glyph="&#xE8EA;" />
+                                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
+                                                    <TextBlock
+                                                        FontWeight="SemiBold"
+                                                        Text="{x:Bind Name, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        FontSize="11"
+                                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                        Text="{x:Bind ConnectionDetail, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        FontSize="11"
+                                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                        Text="{x:Bind RouteSummary, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="4">
+                                                    <ProgressBar
+                                                        Height="3"
+                                                        Maximum="100"
+                                                        Value="{x:Bind MicrophoneLevelPercent, Mode=OneWay}" />
+                                                    <TextBlock
+                                                        FontSize="10"
+                                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                                        Text="{x:Bind SynchronizationDetail, Mode=OneWay}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+                                                <Button
+                                                    Grid.Column="3"
+                                                    Width="32"
+                                                    Height="32"
+                                                    Padding="0"
+                                                    VerticalAlignment="Center"
+                                                    AutomationProperties.Name="断开此设备"
+                                                    Click="DisconnectPhoneDeviceButton_Click">
+                                                    <SymbolIcon Symbol="Cancel" />
+                                                    <ToolTipService.ToolTip>
+                                                        <ToolTip Content="断开此设备" />
+                                                    </ToolTipService.ToolTip>
+                                                </Button>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+
+                                <StackPanel
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    IsHitTestVisible="False"
+                                    Spacing="5"
+                                    Visibility="{x:Bind ViewModel.PhoneDeviceEmptyStateVisibility, Mode=OneWay}">
+                                    <FontIcon
+                                        HorizontalAlignment="Center"
+                                        FontFamily="Segoe Fluent Icons"
+                                        FontSize="22"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Glyph="&#xE8EA;" />
+                                    <TextBlock
+                                        HorizontalAlignment="Center"
+                                        FontSize="13"
+                                        FontWeight="SemiBold"
+                                        Text="暂无已连接设备" />
+                                    <TextBlock
+                                        HorizontalAlignment="Center"
+                                        FontSize="11"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Text="等待手机或平板连接" />
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Grid.Row="2" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock
+                                    VerticalAlignment="Center"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                    Text="{x:Bind ViewModel.PhoneStatus, Mode=OneWay}"
+                                    TextTrimming="CharacterEllipsis" />
+                                <Button
+                                    Grid.Column="1"
+                                    Click="DisconnectPhoneButton_Click"
+                                    Content="断开全部"
+                                    IsEnabled="{x:Bind ViewModel.IsPhoneConnected, Mode=OneWay}" />
+                            </Grid>
+                        </Grid>
+                    </Border>
+
+                    <Border
+                        x:Name="DeviceLinkStatusColumn"
+                        Grid.Column="1"
+                        Padding="18,16"
+                        SizeChanged="AdaptiveColumn_SizeChanged"
+                        Style="{StaticResource VoiceCardStyle}">
+                        <StackPanel Spacing="13">
+                            <StackPanel Spacing="2">
+                                <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="添加设备" />
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                    Text="扫描二维码或输入六位配对码" />
+                            </StackPanel>
+                            <Grid ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="116" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Border
+                                    Width="116"
+                                    Height="116"
+                                    Background="White"
+                                    CornerRadius="4">
+                                    <Image
+                                        x:Name="DeviceLinkQrImage"
+                                        Width="110"
+                                        Height="110"
+                                        Stretch="Uniform" />
+                                </Border>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="7">
+                                    <TextBlock
+                                        FontFamily="Cascadia Mono, Consolas"
+                                        FontSize="24"
+                                        FontWeight="SemiBold"
+                                        Text="{x:Bind ViewModel.PhonePairingCode, Mode=OneWay}" />
+                                    <TextBlock
+                                        FontSize="11"
+                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                        Text="同一局域网内有效"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                            <ComboBox
+                                Header="电脑地址"
+                                HorizontalAlignment="Stretch"
+                                ItemsSource="{x:Bind ViewModel.PhoneAddresses, Mode=OneWay}"
+                                SelectedItem="{x:Bind ViewModel.SelectedPhoneAddress, Mode=TwoWay}"
+                                SelectionChanged="PhoneAddress_SelectionChanged" />
+                            <Button
+                                HorizontalAlignment="Left"
+                                Click="ResetPhonePairingButton_Click"
+                                Content="更换配对码" />
+                            <Border
+                                Margin="0,6,0,0"
+                                Padding="12,10"
+                                Background="{ThemeResource VoiceElevatedBrush}"
+                                BorderBrush="{ThemeResource VoiceStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <StackPanel Spacing="2">
+                                        <TextBlock FontWeight="SemiBold" Text="已保存的手机" />
+                                        <TextBlock
+                                            FontSize="11"
+                                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                            Text="Windows 会记住已配对手机，可直接发起重连，不必再次扫码。"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <ListView
+                                        ItemsSource="{x:Bind ViewModel.SavedPhoneDevices, Mode=OneWay}"
+                                        IsItemClickEnabled="False"
+                                        SelectionMode="None">
+                                        <ListView.ItemContainerStyle>
+                                            <Style TargetType="ListViewItem">
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                <Setter Property="Padding" Value="0" />
+                                                <Setter Property="Margin" Value="0,0,0,5" />
+                                            </Style>
+                                        </ListView.ItemContainerStyle>
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate x:DataType="models:SavedPhoneDevice">
+                                                <Grid ColumnSpacing="8" RowSpacing="3">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            FontWeight="SemiBold"
+                                                            Text="{x:Bind Name, Mode=OneTime}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock
+                                                            FontSize="10"
+                                                            Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                            Text="{x:Bind AddressText, Mode=OneTime}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                    <StackPanel
+                                                        Grid.Column="1"
+                                                        VerticalAlignment="Center"
+                                                        Orientation="Horizontal"
+                                                        Spacing="5">
+                                                        <Button
+                                                            Click="ReconnectSavedPhoneDeviceButton_Click"
+                                                            Content="连接"
+                                                            Padding="9,4" />
+                                                        <Button
+                                                            Click="ForgetSavedPhoneDeviceButton_Click"
+                                                            Content="移除"
+                                                            Padding="9,4" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        x:Name="DeviceLinkRouteCard"
+                        Grid.Row="1"
+                        Grid.ColumnSpan="2"
+                        Padding="18,16"
+                        Style="{StaticResource VoiceCardStyle}">
+                        <Grid RowSpacing="14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="音频路由" />
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Text="硬件共享与多输出同步相互独立" />
+                                </StackPanel>
+                                <TextBlock
+                                    Grid.Column="1"
+                                    VerticalAlignment="Center"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                    Text="{x:Bind ViewModel.PhoneRouteSelectionText, Mode=OneWay}" />
+                            </Grid>
+
+                            <Grid Grid.Row="1" ColumnSpacing="24" RowSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition x:Name="PhoneMicrophoneRouteColumn" Width="*" />
+                                    <ColumnDefinition x:Name="PhoneRouteSeparatorColumn" Width="1" />
+                                    <ColumnDefinition x:Name="PhoneSpeakerRouteColumn" Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel x:Name="PhoneMicrophoneRoutePanel" Spacing="12">
+                                    <StackPanel Spacing="1">
+                                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="手机作为电脑麦克风" />
+                                        <TextBlock
+                                            FontSize="11"
+                                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                            Text="一次选择一台设备写入 VB-CABLE" />
+                                    </StackPanel>
+                                    <ComboBox
+                                        Header="VB-CABLE 播放端点"
+                                        DisplayMemberPath="DisplayName"
+                                        HorizontalAlignment="Stretch"
+                                        IsEnabled="{x:Bind ViewModel.HasVirtualCable, Mode=OneWay}"
+                                        ItemsSource="{x:Bind ViewModel.PhoneMicrophoneOutputs, Mode=OneWay}"
+                                        PlaceholderText="未检测到 CABLE Input"
+                                        SelectedItem="{x:Bind ViewModel.SelectedPhoneMicrophoneOutput, Mode=TwoWay}" />
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="42" />
+                                        </Grid.ColumnDefinitions>
+                                        <Slider
+                                            Header="麦克风输出音量"
+                                            Maximum="100"
+                                            Minimum="0"
+                                            Value="{x:Bind ViewModel.PhoneMicrophoneOutputVolume, Mode=TwoWay}" />
+                                        <TextBlock
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Bottom"
+                                            FontFamily="Cascadia Mono, Consolas"
+                                            Text="{x:Bind ViewModel.PhoneMicrophoneOutputVolume, Mode=OneWay}" />
+                                    </Grid>
+                                    <ItemsControl ItemsSource="{x:Bind ViewModel.PhoneDevices, Mode=OneWay}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:PhoneDeviceItem">
+                                                <Grid MinHeight="58" Padding="0,4" ColumnSpacing="10">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="104" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                                                        <TextBlock FontWeight="SemiBold" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock
+                                                            FontSize="10"
+                                                            Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                            Text="{x:Bind SynchronizationDetail, Mode=OneWay}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
+                                                        <Slider
+                                                            Maximum="200"
+                                                            Minimum="0"
+                                                            StepFrequency="5"
+                                                            Value="{x:Bind MicrophoneGainPercent, Mode=TwoWay}" />
+                                                        <TextBlock
+                                                            HorizontalAlignment="Center"
+                                                            FontSize="10"
+                                                            Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                            Text="{x:Bind MicrophoneGainText, Mode=OneWay}" />
+                                                    </StackPanel>
+                                                    <ToggleSwitch
+                                                        Grid.Column="2"
+                                                        MinWidth="44"
+                                                        VerticalAlignment="Center"
+                                                        IsOn="{x:Bind UseAsMicrophone, Mode=TwoWay}"
+                                                        OffContent=""
+                                                        OnContent="" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock
+                                        FontSize="11"
+                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                        Text="{x:Bind ViewModel.PhoneMicrophoneRouteStatus, Mode=OneWay}"
+                                        TextWrapping="Wrap" />
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Button Click="OpenVirtualCableWebsiteButton_Click" Content="获取 VB-CABLE" />
+                                        <Button
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Stretch"
+                                            Click="PhoneMicrophoneRouteButton_Click"
+                                            Content="{x:Bind ViewModel.PhoneMicrophoneRouteActionText, Mode=OneWay}"
+                                            IsEnabled="{x:Bind ViewModel.CanTogglePhoneMicrophoneRoute, Mode=OneWay}"
+                                            Style="{StaticResource AccentButtonStyle}" />
+                                    </Grid>
+                                </StackPanel>
+
+                                <Border
+                                    x:Name="PhoneRouteSeparator"
+                                    Grid.Column="1"
+                                    Background="{ThemeResource VoiceStrokeBrush}" />
+
+                                <StackPanel
+                                    x:Name="PhoneSpeakerRoutePanel"
+                                    Grid.Column="2"
+                                    Spacing="12">
+                                    <StackPanel Spacing="1">
+                                        <TextBlock FontSize="16" FontWeight="SemiBold" Text="手机作为电脑扬声器" />
+                                        <TextBlock
+                                            FontSize="11"
+                                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                            Text="同一捕获流独立分发到选中的移动设备" />
+                                    </StackPanel>
+                                    <ComboBox
+                                        Header="Windows 声音来源"
+                                        DisplayMemberPath="DisplayName"
+                                        HorizontalAlignment="Stretch"
+                                        IsEnabled="{x:Bind ViewModel.PhonePlaybackSourceEnabled, Mode=OneWay}"
+                                        ItemsSource="{x:Bind ViewModel.CaptureSources, Mode=OneWay}"
+                                        PlaceholderText="未检测到播放端点"
+                                        SelectedItem="{x:Bind ViewModel.SelectedPhonePlaybackSource, Mode=TwoWay}" />
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="42" />
+                                        </Grid.ColumnDefinitions>
+                                        <Slider
+                                            Header="发送音量"
+                                            Maximum="100"
+                                            Minimum="0"
+                                            Value="{x:Bind ViewModel.PhonePlaybackVolume, Mode=TwoWay}" />
+                                        <TextBlock
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Bottom"
+                                            FontFamily="Cascadia Mono, Consolas"
+                                            Text="{x:Bind ViewModel.PhonePlaybackVolume, Mode=OneWay}" />
+                                    </Grid>
+                                    <ItemsControl ItemsSource="{x:Bind ViewModel.PhoneDevices, Mode=OneWay}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:PhoneDeviceItem">
+                                                <Grid MinHeight="58" Padding="0,4" ColumnSpacing="10">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                                                        <TextBlock FontWeight="SemiBold" Text="{x:Bind Name, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock
+                                                            FontSize="10"
+                                                            Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                            Text="{x:Bind PlaybackSynchronizationDetail, Mode=OneWay}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                    <ToggleSwitch
+                                                        Grid.Column="1"
+                                                        MinWidth="44"
+                                                        VerticalAlignment="Center"
+                                                        IsEnabled="{x:Bind SupportsPlayback, Mode=OneWay}"
+                                                        IsOn="{x:Bind UseAsSpeaker, Mode=TwoWay}"
+                                                        OffContent=""
+                                                        OnContent="" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock
+                                        FontSize="11"
+                                        Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                        Text="{x:Bind ViewModel.PhonePlaybackStatus, Mode=OneWay}"
+                                        TextWrapping="Wrap" />
+                                    <Button
+                                        MinHeight="38"
+                                        HorizontalAlignment="Stretch"
+                                        Click="PhonePlaybackButton_Click"
+                                        Content="{x:Bind ViewModel.PhonePlaybackActionText, Mode=OneWay}"
+                                        IsEnabled="{x:Bind ViewModel.CanTogglePhonePlayback, Mode=OneWay}"
+                                        Style="{StaticResource AccentButtonStyle}" />
+                                </StackPanel>
+                            </Grid>
+                        </Grid>
+                    </Border>
+
+                    <Border
+                        x:Name="DeviceLinkFeatureCard"
+                        Grid.Row="2"
+                        Grid.ColumnSpan="2"
+                        Padding="18,16"
+                        Style="{StaticResource VoiceCardStyle}">
+                        <Grid RowSpacing="12">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="手机增强控制" />
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Text="触摸板、快捷键、扫码、拍照和高速文件互传均使用独立的 v1.2.4.1 能力通道。"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock
+                                    Grid.Column="1"
+                                    HorizontalAlignment="Right"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                        Text="v1.2.4.1" />
+                            </Grid>
+                            <TextBlock
+                                Grid.Row="1"
+                                Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                Text="{x:Bind ViewModel.FeatureStatus, Mode=OneWay}"
+                                TextWrapping="Wrap" />
+                            <Grid Grid.Row="2" ColumnSpacing="8" RowSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Button
+                                    Click="RequestPhoneScanButton_Click"
+                                    Content="手机扫码"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}" />
+                                <Button
+                                    Grid.Column="1"
+                                    Click="RequestPhoneGalleryScanButton_Click"
+                                    Content="相册扫码"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}" />
+                                <Button
+                                    Grid.Column="2"
+                                    Click="RequestPhoneCaptureButton_Click"
+                                    Content="拍照传电脑"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}" />
+                                <Button
+                                    Grid.Column="3"
+                                    Content="打开触摸板"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}"
+                                    Click="OpenPhoneTouchpadButton_Click" />
+                            </Grid>
+                            <Border
+                                Grid.Row="3"
+                                Padding="10,8"
+                                Background="{ThemeResource VoiceElevatedBrush}"
+                                BorderBrush="{ThemeResource VoiceStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Visibility="{x:Bind ViewModel.HasScanResult, Mode=OneWay}">
+                                <TextBlock
+                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                    Text="{x:Bind ViewModel.LastScanResult, Mode=OneWay}"
+                                    TextTrimming="CharacterEllipsis" />
+                            </Border>
+                            <StackPanel Grid.Row="4" Spacing="8">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="电脑应用快捷入口" />
+                                        <TextBlock
+                                            FontSize="12"
+                                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                            Text="在电脑端选择 .exe 后，手机触摸板会同步显示并可一键启动。"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Button
+                                        Grid.Column="1"
+                                        Click="AddComputerShortcutButton_Click"
+                                        Content="添加应用" />
+                                </Grid>
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                    Text="{x:Bind ViewModel.ComputerShortcutsText, Mode=OneWay}"
+                                    TextWrapping="Wrap" />
+                                <ItemsControl ItemsSource="{x:Bind ViewModel.ComputerShortcuts, Mode=OneWay}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="models:ComputerShortcut">
+                                            <Grid ColumnSpacing="8" Padding="0,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock
+                                                    VerticalAlignment="Center"
+                                                    Text="{x:Bind Name}"
+                                                    TextTrimming="CharacterEllipsis" />
+                                                <Button
+                                                    Grid.Column="1"
+                                                    Click="RemoveComputerShortcutButton_Click"
+                                                    Content="移除" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+            </Grid>
+        </ScrollViewer>
+
+        <Border
+            Grid.Row="1"
+            Padding="24,10"
+            Background="{ThemeResource VoiceSurfaceBrush}"
+            BorderBrush="{ThemeResource VoiceStrokeBrush}"
+            BorderThickness="0,1,0,0">
+            <Grid MaxWidth="1280" HorizontalAlignment="Stretch" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel x:Name="SyncFooterStatus" VerticalAlignment="Center" Orientation="Horizontal" Spacing="10">
+                    <Ellipse Width="8" Height="8" Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+                    <StackPanel Spacing="1">
+                        <TextBlock FontSize="12" FontWeight="SemiBold" Text="{x:Bind ViewModel.StatusBadge, Mode=OneWay}" />
+                        <TextBlock
+                            MaxWidth="360"
+                            FontSize="11"
+                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                            Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}"
+                            TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </StackPanel>
+                <StackPanel
+                    x:Name="DeviceLinkFooterStatus"
+                    VerticalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="10"
+                    Visibility="Collapsed">
+                    <Ellipse Width="8" Height="8" Fill="{ThemeResource AccentFillColorDefaultBrush}" />
+                    <StackPanel Spacing="1">
+                        <TextBlock FontSize="12" FontWeight="SemiBold" Text="{x:Bind ViewModel.PhoneConnectionText, Mode=OneWay}" />
+                        <TextBlock
+                            MaxWidth="440"
+                            FontSize="11"
+                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                            Text="{x:Bind ViewModel.PhoneStatus, Mode=OneWay}"
+                            TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </StackPanel>
+                <Button
+                    Grid.Column="1"
+                    VerticalAlignment="Center"
+                    AutomationProperties.Name="运行记录"
+                    Style="{StaticResource VoiceIconButtonStyle}">
+                    <SymbolIcon Symbol="Document" />
+                    <Button.Flyout>
+                        <Flyout>
+                            <StackPanel Width="420" Spacing="10">
+                                <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="运行记录" />
+                                <ListView
+                                    MaxHeight="240"
+                                    ItemsSource="{x:Bind ViewModel.Activity, Mode=OneWay}"
+                                    SelectionMode="None" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                    <ToolTipService.ToolTip>
+                        <ToolTip Content="运行记录" />
+                    </ToolTipService.ToolTip>
+                </Button>
+                <Button
+                    x:Name="CalibrationActionButton"
+                    Grid.Column="2"
+                    MinWidth="108"
+                    MinHeight="40"
+                    VerticalAlignment="Center"
+                    Click="CalibrateButton_Click"
+                    Content="{x:Bind ViewModel.CalibrationButtonText, Mode=OneWay}"
+                    IsEnabled="{x:Bind ViewModel.CanCalibrate, Mode=OneWay}" />
+                <Button
+                    x:Name="StartActionButton"
+                    Grid.Column="3"
+                    MinWidth="132"
+                    MinHeight="40"
+                    VerticalAlignment="Center"
+                    Click="StartButton_Click"
+                    Content="{x:Bind ViewModel.StartButtonText, Mode=OneWay}"
+                    IsEnabled="{x:Bind ViewModel.CanControlSynchronization, Mode=OneWay}"
+                    Style="{StaticResource AccentButtonStyle}" />
+            </Grid>
+        </Border>
+    </Grid>
+</Page>

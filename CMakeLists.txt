@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(VoiceSpreader VERSION 1.2.0 LANGUAGES CXX)
+project(VoiceSpreader VERSION 1.2.4.72 LANGUAGES CXX)
 
 include(CTest)
 

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="VoiceSpreader.App.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default">
+                    <SolidColorBrush x:Key="VoicePageBrush" Color="#E8111315" />
+                    <SolidColorBrush x:Key="VoiceSurfaceBrush" Color="#E81C1F22" />
+                    <SolidColorBrush x:Key="VoiceElevatedBrush" Color="#FF25292D" />
+                    <SolidColorBrush x:Key="VoiceStrokeBrush" Color="#2AFFFFFF" />
+                    <SolidColorBrush x:Key="VoiceMutedTextBrush" Color="#BFC7CDD4" />
+                    <SolidColorBrush x:Key="VoiceSubtleTextBrush" Color="#82C7CDD4" />
+                    <SolidColorBrush x:Key="VoiceTrackBrush" Color="#32FFFFFF" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="VoicePageBrush" Color="#E8F4F6F7" />
+                    <SolidColorBrush x:Key="VoiceSurfaceBrush" Color="#F2FFFFFF" />
+                    <SolidColorBrush x:Key="VoiceElevatedBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="VoiceStrokeBrush" Color="#1F18212A" />
+                    <SolidColorBrush x:Key="VoiceMutedTextBrush" Color="#B83A424B" />
+                    <SolidColorBrush x:Key="VoiceSubtleTextBrush" Color="#803A424B" />
+                    <SolidColorBrush x:Key="VoiceTrackBrush" Color="#2218212A" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+
+            <SolidColorBrush x:Key="VoiceSuccessBrush" Color="#FF28A273" />
+            <SolidColorBrush x:Key="VoiceWarningBrush" Color="#FFE0A21A" />
+
+            <Style x:Key="VoiceCardStyle" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource VoiceSurfaceBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource VoiceStrokeBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="6" />
+            </Style>
+
+            <Style x:Key="VoiceIconButtonStyle" TargetType="Button">
+                <Setter Property="Width" Value="38" />
+                <Setter Property="Height" Value="38" />
+                <Setter Property="Padding" Value="0" />
+                <Setter Property="CornerRadius" Value="6" />
+                <Setter Property="Background" Value="{ThemeResource VoiceElevatedBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource VoiceStrokeBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+            </Style>
+
+            <Style x:Key="VoiceSectionTitleStyle" TargetType="TextBlock">
+                <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI" />
+                <Setter Property="FontSize" Value="17" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+            </Style>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

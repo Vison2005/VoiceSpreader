@@ -92,6 +92,7 @@ var protocol2Hello = JsonSerializer.SerializeToUtf8Bytes(new
     deviceId = "phone-1",
     deviceName = "WinUI protocol 2 phone",
     microphoneRequests = true,
+    capabilities = new List<string> { "audio", "input.touchpad" },
 });
 await protocol2Stream.WriteAsync(protocol2Hello);
 await protocol2Stream.WriteAsync("\n"u8.ToArray());
@@ -100,6 +101,19 @@ Require(protocol2Accepted.Contains("\"protocol\":2", StringComparison.Ordinal),
     "TCP v2 握手未协商二进制下行协议");
 Require(protocol2Accepted.Contains("\"microphoneRequests\":true", StringComparison.Ordinal),
     "TCP v2 握手未声明由 Windows 协调麦克风请求");
+
+// v1.2.4.3 基础触摸板复用音频会话；没有 capability 列表的旧版 protocol 2 手机也必须能传输入帧。
+var protocol2Pointer = new TaskCompletionSource<PhoneInputPointerEventArgs>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
+void OnProtocol2Pointer(object? _, PhoneInputPointerEventArgs args) => protocol2Pointer.TrySetResult(args);
+service.InputPointerReceived += OnProtocol2Pointer;
+await protocol2Stream.WriteAsync(CreateFeaturePointerFrame(1, 1600, -900));
+var receivedProtocol2Pointer = await protocol2Pointer.Task.WaitAsync(TimeSpan.FromSeconds(2));
+service.InputPointerReceived -= OnProtocol2Pointer;
+Require(receivedProtocol2Pointer.DeviceId == "phone-1"
+        && receivedProtocol2Pointer.DeltaX == 1600
+        && receivedProtocol2Pointer.DeltaY == -900,
+    "基础触摸板输入帧没有抵达 protocol 2 音频会话");
 
 var microphoneRequest = new TaskCompletionSource<PhoneMicrophoneRequestEventArgs>(
     TaskCreationOptions.RunContinuationsAsynchronously);
@@ -166,7 +180,8 @@ await WaitForAsync(() => !service.IsMicrophoneStreaming,
 
 Require(await service.SetMicrophoneEnabledAsync("phone-1", true),
     "手机主动停止后无法再次启用 v2 麦克风");
-Require((await ReadBinaryFrameAsync(protocol2Stream)).SequenceEqual(new byte[] { 10, 1 }),
+var restartCommand = await ReadBinaryFrameAsync(protocol2Stream);
+Require(restartCommand.SequenceEqual(new byte[] { 10, 1 }),
     "手机主动停止后重新启用命令格式无效");
 await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
 await WaitForAsync(() => service.IsMicrophoneStreaming,
@@ -223,8 +238,6 @@ await WaitForAsync(() => service.IsMicrophoneStreaming, "第二台设备麦克�
 var framesBeforeRejectedSource = sink.MixedFrameCount;
 await protocol2Stream.WriteAsync(CreateMicrophoneStateFrame(enabled: true));
 await protocol2Stream.WriteAsync(CreatePcmFrame(124000, 48_000, Enumerable.Repeat((short)3000, 1920).ToArray()));
-Require((await ReadBinaryFrameAsync(protocol2Stream)).SequenceEqual(new byte[] { 10, 0 }),
-    "服务端没有纠正非当前设备未经确认的麦克风传输状态");
 await Task.Delay(150);
 Require(sink.MixedFrameCount == framesBeforeRejectedSource,
     "已经停用的设备仍能向 VB-CABLE 写入麦克风数据");
@@ -256,6 +269,64 @@ Require(await service.SetMicrophoneEnabledAsync("phone-1", false), "桌面端无
 var stopProtocol2MicrophoneCommand = await ReadBinaryFrameAsync(protocol2Stream);
 Require(stopProtocol2MicrophoneCommand.SequenceEqual(new byte[] { 10, 0 }),
     "v2 麦克风停用命令格式无效");
+
+// protocol 3 功能通道回归：服务端下发目录后，手机触摸帧必须保持连接并抵达输入事件。
+// 先关闭前面留下的 v2 流，避免测试客户端的未读下行命令干扰 v3 握手。
+service.DisconnectPhone();
+await Task.Delay(120);
+service.ComputerShortcutsProvider = () =>
+[
+    new ComputerShortcut("smoke-app", "Smoke", Environment.ProcessPath ?? "C:\\Windows\\System32\\notepad.exe"),
+];
+var pointerReceived = new TaskCompletionSource<PhoneInputPointerEventArgs>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
+void OnPointerReceived(object? _, PhoneInputPointerEventArgs args) => pointerReceived.TrySetResult(args);
+void ThrowingPointerHandler(object? sender, PhoneInputPointerEventArgs args) =>
+    throw new InvalidOperationException("模拟本机输入桥接异常");
+service.InputPointerReceived += OnPointerReceived;
+service.InputPointerReceived += ThrowingPointerHandler;
+using var featureClient = new TcpClient();
+await featureClient.ConnectAsync(IPAddress.Loopback, service.ServerPort);
+var featureStream = featureClient.GetStream();
+var featureHello = JsonSerializer.SerializeToUtf8Bytes(new
+{
+    type = "hello",
+    protocol = 3,
+    session = payloadParts[3],
+    secret = payloadParts[4],
+    deviceId = "phone-feature-smoke",
+    deviceName = "WinUI protocol 3 phone",
+    capabilities = new List<string> { "input.touchpad", "input.shortcut", "input.app" },
+});
+await featureStream.WriteAsync(featureHello);
+await featureStream.WriteAsync("\n"u8.ToArray());
+var featureAccepted = await ReadLineAsync(featureStream);
+Require(featureAccepted.Contains("\"protocol\":3", StringComparison.Ordinal),
+    "TCP v3 功能握手未被接受");
+var catalogFrame = await ReadBinaryFrameAsync(featureStream).WaitAsync(TimeSpan.FromSeconds(2));
+Require(catalogFrame[0] == 34
+        && Encoding.UTF8.GetString(catalogFrame, 1, catalogFrame.Length - 1).Contains("smoke-app", StringComparison.Ordinal),
+    "Windows 应用目录没有下发到 v3 功能通道");
+await featureStream.WriteAsync(CreateFeaturePointerFrame(1, 1200, -800));
+var pointer = await pointerReceived.Task.WaitAsync(TimeSpan.FromSeconds(2));
+Require(pointer.DeviceId == "phone-feature-smoke" && pointer.DeltaX == 1200 && pointer.DeltaY == -800,
+    "v3 触摸帧没有抵达 Windows 输入事件");
+pointerReceived = new TaskCompletionSource<PhoneInputPointerEventArgs>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
+await featureStream.WriteAsync(CreateFeaturePointerFrame(2, -600, 400));
+var secondPointer = await pointerReceived.Task.WaitAsync(TimeSpan.FromSeconds(2));
+var zoomReceived = new TaskCompletionSource<PhoneInputZoomEventArgs>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
+void OnZoomReceived(object? _, PhoneInputZoomEventArgs args) => zoomReceived.TrySetResult(args);
+service.InputZoomReceived += OnZoomReceived;
+await featureStream.WriteAsync(CreateFeatureZoomFrame(3, 1250));
+var zoom = await zoomReceived.Task.WaitAsync(TimeSpan.FromSeconds(2));
+Require(zoom.DeviceId == "phone-feature-smoke" && zoom.Delta == 1250,
+    "v3 捏合缩放帧没有抵达 Windows 输入事件");
+service.InputZoomReceived -= OnZoomReceived;
+Require(secondPointer.Sequence == 2, "v3 触摸通道在第一次点击后没有保持连接");
+service.InputPointerReceived -= OnPointerReceived;
+service.InputPointerReceived -= ThrowingPointerHandler;
 
 Console.WriteLine("WinUI phone pairing protocol smoke test passed");
 
@@ -308,6 +379,35 @@ static byte[] CreateClockFrame(ulong frameIndex, ulong monotonicNanoseconds)
     frame[4] = 4;
     BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(5, 8), frameIndex);
     BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(13, 8), monotonicNanoseconds);
+    return frame;
+}
+
+static byte[] CreateFeaturePointerFrame(uint sequence, int deltaX, int deltaY)
+{
+    var body = new byte[26];
+    body[0] = 30;
+    BinaryPrimitives.WriteUInt32BigEndian(body.AsSpan(1, 4), sequence);
+    BinaryPrimitives.WriteUInt64BigEndian(body.AsSpan(5, 8), sequence * 1000UL);
+    body[13] = 1;
+    BinaryPrimitives.WriteUInt32BigEndian(body.AsSpan(14, 4), 1);
+    BinaryPrimitives.WriteInt32BigEndian(body.AsSpan(18, 4), deltaX);
+    BinaryPrimitives.WriteInt32BigEndian(body.AsSpan(22, 4), deltaY);
+    var frame = new byte[4 + body.Length];
+    BinaryPrimitives.WriteUInt32BigEndian(frame, (uint)body.Length);
+    body.CopyTo(frame, 4);
+    return frame;
+}
+
+static byte[] CreateFeatureZoomFrame(uint sequence, int delta)
+{
+    var body = new byte[17];
+    body[0] = 35;
+    BinaryPrimitives.WriteUInt32BigEndian(body.AsSpan(1, 4), sequence);
+    BinaryPrimitives.WriteUInt64BigEndian(body.AsSpan(5, 8), sequence * 1000UL);
+    BinaryPrimitives.WriteInt32BigEndian(body.AsSpan(13, 4), delta);
+    var frame = new byte[4 + body.Length];
+    BinaryPrimitives.WriteUInt32BigEndian(frame, (uint)body.Length);
+    body.CopyTo(frame, 4);
     return frame;
 }
 

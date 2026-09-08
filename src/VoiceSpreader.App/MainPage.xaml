@@ -29,11 +29,12 @@
                 HorizontalAlignment="Stretch"
                 SizeChanged="PageRoot_SizeChanged"
                 Tapped="PageRoot_Tapped">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
 
                 <Grid Margin="0,0,0,16">
                     <Grid.ColumnDefinitions>
@@ -255,6 +256,7 @@
                                                 <SelectorBarItem Text="跟随系统" />
                                                 <SelectorBarItem Text="浅色" />
                                                 <SelectorBarItem Text="深色" />
+                                                <SelectorBarItem Text="极暗" />
                                             </SelectorBar>
                                         </StackPanel>
                                         <Border BorderBrush="{ThemeResource VoiceStrokeBrush}" BorderThickness="0,1,0,0" />
@@ -699,6 +701,7 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <Border Padding="18,16" Style="{StaticResource VoiceCardStyle}">
@@ -909,6 +912,72 @@
                                 HorizontalAlignment="Left"
                                 Click="ResetPhonePairingButton_Click"
                                 Content="更换配对码" />
+                            <Border
+                                Margin="0,6,0,0"
+                                Padding="12,10"
+                                Background="{ThemeResource VoiceElevatedBrush}"
+                                BorderBrush="{ThemeResource VoiceStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <StackPanel Spacing="2">
+                                        <TextBlock FontWeight="SemiBold" Text="已保存的手机" />
+                                        <TextBlock
+                                            FontSize="11"
+                                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                            Text="Windows 会记住已配对手机，可直接发起重连，不必再次扫码。"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <ListView
+                                        ItemsSource="{x:Bind ViewModel.SavedPhoneDevices, Mode=OneWay}"
+                                        IsItemClickEnabled="False"
+                                        SelectionMode="None">
+                                        <ListView.ItemContainerStyle>
+                                            <Style TargetType="ListViewItem">
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                <Setter Property="Padding" Value="0" />
+                                                <Setter Property="Margin" Value="0,0,0,5" />
+                                            </Style>
+                                        </ListView.ItemContainerStyle>
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate x:DataType="models:SavedPhoneDevice">
+                                                <Grid ColumnSpacing="8" RowSpacing="3">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            FontWeight="SemiBold"
+                                                            Text="{x:Bind Name, Mode=OneTime}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock
+                                                            FontSize="10"
+                                                            Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                                            Text="{x:Bind AddressText, Mode=OneTime}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                    <StackPanel
+                                                        Grid.Column="1"
+                                                        VerticalAlignment="Center"
+                                                        Orientation="Horizontal"
+                                                        Spacing="5">
+                                                        <Button
+                                                            Click="ReconnectSavedPhoneDeviceButton_Click"
+                                                            Content="连接"
+                                                            Padding="9,4" />
+                                                        <Button
+                                                            Click="ForgetSavedPhoneDeviceButton_Click"
+                                                            Content="移除"
+                                                            Padding="9,4" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                     </Border>
 
@@ -1131,6 +1200,136 @@
                                         Style="{StaticResource AccentButtonStyle}" />
                                 </StackPanel>
                             </Grid>
+                        </Grid>
+                    </Border>
+
+                    <Border
+                        x:Name="DeviceLinkFeatureCard"
+                        Grid.Row="2"
+                        Grid.ColumnSpan="2"
+                        Padding="18,16"
+                        Style="{StaticResource VoiceCardStyle}">
+                        <Grid RowSpacing="12">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="手机增强控制" />
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                        Text="v1.2.4.72 修复开机自启动，并继续提供跟随应用主题的全屏触摸板：移动光标、单击、双指滚动和低灵敏度捏合缩放。"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock
+                                    Grid.Column="1"
+                                    HorizontalAlignment="Right"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                        Text="v1.2.4.72" />
+                            </Grid>
+                            <TextBlock
+                                Grid.Row="1"
+                                Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                Text="{x:Bind ViewModel.FeatureStatus, Mode=OneWay}"
+                                TextWrapping="Wrap" />
+                            <Grid Grid.Row="2" ColumnSpacing="8" RowSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Button
+                                    Click="RequestPhoneScanButton_Click"
+                                    Content="手机扫码"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}"
+                                    Visibility="Collapsed" />
+                                <Button
+                                    Grid.Column="1"
+                                    Click="RequestPhoneGalleryScanButton_Click"
+                                    Content="相册扫码"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}"
+                                    Visibility="Collapsed" />
+                                <Button
+                                    Grid.Column="2"
+                                    Click="RequestPhoneCaptureButton_Click"
+                                    Content="拍照传电脑"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}"
+                                    Visibility="Collapsed" />
+                                <Button
+                                    Grid.Column="3"
+                                    Content="打开触摸板"
+                                    IsEnabled="{x:Bind ViewModel.CanRequestPhoneFeatures, Mode=OneWay}"
+                                    Click="OpenPhoneTouchpadButton_Click" />
+                            </Grid>
+                            <Border
+                                Grid.Row="3"
+                                Padding="10,8"
+                                Background="{ThemeResource VoiceElevatedBrush}"
+                                BorderBrush="{ThemeResource VoiceStrokeBrush}"
+                                BorderThickness="1"
+                                CornerRadius="6"
+                                Visibility="Collapsed">
+                                <TextBlock
+                                    Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                    Text="{x:Bind ViewModel.LastScanResult, Mode=OneWay}"
+                                    TextTrimming="CharacterEllipsis" />
+                            </Border>
+                            <StackPanel Grid.Row="4" Spacing="8" Visibility="Collapsed">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Style="{StaticResource VoiceSectionTitleStyle}" Text="电脑应用快捷入口" />
+                                        <TextBlock
+                                            FontSize="12"
+                                            Foreground="{ThemeResource VoiceSubtleTextBrush}"
+                                            Text="在电脑端选择 .exe 后，手机触摸板会同步显示并可一键启动。"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Button
+                                        Grid.Column="1"
+                                        Click="AddComputerShortcutButton_Click"
+                                        Content="添加应用" />
+                                </Grid>
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource VoiceMutedTextBrush}"
+                                    Text="{x:Bind ViewModel.ComputerShortcutsText, Mode=OneWay}"
+                                    TextWrapping="Wrap" />
+                                <ItemsControl ItemsSource="{x:Bind ViewModel.ComputerShortcuts, Mode=OneWay}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="models:ComputerShortcut">
+                                            <Grid ColumnSpacing="8" Padding="0,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock
+                                                    VerticalAlignment="Center"
+                                                    Text="{x:Bind Name}"
+                                                    TextTrimming="CharacterEllipsis" />
+                                                <Button
+                                                    Grid.Column="1"
+                                                    Click="RemoveComputerShortcutButton_Click"
+                                                    Content="移除" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
                         </Grid>
                     </Border>
                 </Grid>
