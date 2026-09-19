@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = '1.2.4.72',
+    [string]$Version = '1.2.4.8',
     [string]$Publisher = 'CN=Vison2005'
 )
 

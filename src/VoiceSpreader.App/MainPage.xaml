@@ -1227,7 +1227,7 @@
                                     <TextBlock
                                         FontSize="12"
                                         Foreground="{ThemeResource VoiceSubtleTextBrush}"
-                                        Text="v1.2.4.72 修复开机自启动，并继续提供跟随应用主题的全屏触摸板：移动光标、单击、双指滚动和低灵敏度捏合缩放。"
+                                        Text="v1.2.4.8 优化全屏触摸板：新增三指/四指滑动、点按、双击映射，以及可自定义的鼠标动作、快捷键和电脑端应用。"
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                                 <TextBlock
@@ -1235,7 +1235,7 @@
                                     HorizontalAlignment="Right"
                                     FontSize="12"
                                     Foreground="{ThemeResource VoiceMutedTextBrush}"
-                                        Text="v1.2.4.72" />
+                                        Text="v1.2.4.8" />
                             </Grid>
                             <TextBlock
                                 Grid.Row="1"

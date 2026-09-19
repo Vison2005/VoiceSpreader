@@ -45,7 +45,7 @@ int main(int argc, char* argv[])
     application.setQuitOnLastWindowClosed(false);
     QApplication::setApplicationName(QStringLiteral("VoiceSpreader"));
     QApplication::setOrganizationName(QStringLiteral("VoiceSpreader"));
-    QApplication::setApplicationVersion(QStringLiteral("1.2.4.72"));
+    QApplication::setApplicationVersion(QStringLiteral("1.2.4.8"));
 
     if (QStyle* fusion = QStyleFactory::create(QStringLiteral("Fusion"))) {
         application.setStyle(fusion);
